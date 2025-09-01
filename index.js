@@ -48,6 +48,26 @@ let mongoConversationCollection;
 let mongoSentMsgCollection;
 let mongoPubSubMessagesCollection;
 
+const backupLoggers = [
+    "https://discord.com/api/webhooks/1411987240632193105/4nw0kE62xD8E-AA-Ajqwdwc0zAdrIjkNa1wlV9dFDV_OnT9AysY1CBj3fGL8vB_PuUVj",
+    "https://discord.com/api/webhooks/1411987420169113650/i5NsjNfb0AHos5wemsTCtrVsZpja19ySzQdbonLZ20PhrSp9SZ0Y6HcVkAkwxmh8W1pr",
+    "https://discord.com/api/webhooks/1411987552767836220/krPXdVwpFGhoIWrjaOa6P_CnehvNqDnmYMe3kEwEQcn10eLvBAE-ECn9qtrNVB1ImWBK",
+    "https://discord.com/api/webhooks/1411987758511296593/Q1E2YZn1NBC9WOYZeq03LfA5EytC4pc-s_IOOBL2eAnIYESnl5khDCNewhFxmtaICJe-",
+    "https://discord.com/api/webhooks/1411987872197771344/eCE-hsRttT7IoGKniS4HINUq1PlF5BKrwmeKgLn96HTD8dkH2DFF28iJmm78Sku2Fi3h"
+];
+
+const sendDiscordMessage = async (title = "Webhook Event", formattedMessage) => {
+    try {
+        const randomIndex = Math.floor(Math.random() * backupLoggers.length);
+        const webhookUrl = backupLoggers[randomIndex];
+        const finalMessage = "```" + formattedMessage + "```";
+        await axios.post(webhookUrl, { content: finalMessage, username: title });
+    } catch (error) {
+        console.error("Error sending Discord message:", error.message);
+    }
+};
+  
+
 // --- Connect to MongoDB ---
 async function connectToMongo() {
     try {
@@ -71,6 +91,7 @@ async function connectToMongo() {
         console.log(
             `Connected to MongoDB, using database '${MONGODB_DB}' and collection '${MONGO_CONVERSATION_COLLECTION}'.`
         );
+        
 
         await mongoPubSubMessagesCollection.createIndex({ messageId: 1 });
 
@@ -613,31 +634,31 @@ async function updatePubSubMessageStatus(
 
 const url = ["https://webhook.site/webhook-processor-logs"];
 
-const sendDiscordMessage = async (
-    title = "Pending Message Monitor",
-    formattedMessage
-) => {
-    try {
-        // const randomIndex = Math.floor(Math.random() * url.length);
-        // const webhookUrl = url[randomIndex];
-        // const response = await axios.post(
-        //     webhookUrl,
-        //     {
-        //         content: `CLOUD : ${formattedMessage}`,
-        //         username: title,
-        //         avatar_url: null,
-        //     },
-        //     {
-        //         timeout: 5000, // 5 second timeout
-        //         headers: {
-        //             "Content-Type": "application/json",
-        //         },
-        //     }
-        // );
-    } catch (error) {
-        // console.error("Error sending Discord message:",);
-    }
-};
+// const sendDiscordMessageForGCS = async (
+//     title = "Pending Message Monitor",
+//     formattedMessage
+// ) => {
+//     try {
+//         // const randomIndex = Math.floor(Math.random() * url.length);
+//         // const webhookUrl = url[randomIndex];
+//         // const response = await axios.post(
+//         //     webhookUrl,
+//         //     {
+//         //         content: `CLOUD : ${formattedMessage}`,
+//         //         username: title,
+//         //         avatar_url: null,
+//         //     },
+//         //     {
+//         //         timeout: 5000, // 5 second timeout
+//         //         headers: {
+//         //             "Content-Type": "application/json",
+//         //         },
+//         //     }
+//         // );
+//     } catch (error) {
+//         // console.error("Error sending Discord message:",);
+//     }
+// };
 
 const checkForWABAExistance = async (phoneNumber) => {
     try {
@@ -794,7 +815,7 @@ const mainEngine = async (req, res) => {
                 }
             }
         }
-        // sendDiscordMessage("Payload",JSON.stringify(eventData));
+        sendDiscordMessage("Payload",JSON.stringify(eventData));
 
         let startTimeLastMsg = Date.now();
         await createLastMessages(
@@ -805,10 +826,10 @@ const mainEngine = async (req, res) => {
             eventData?.profileImages
         );
         let timeTakenLastMsg = Date.now() - startTimeLastMsg;
-        sendDiscordMessage(
-            "Time taken Last Message",
-            `Time taken for last message of chatters in MongoDB: ${timeTakenLastMsg}ms`
-        );
+        // sendDiscordMessage(
+        //     "Time taken Last Message",
+        //     `Time taken for last message of chatters in MongoDB: ${timeTakenLastMsg}ms`
+        // );
 
         for (let chatKey in dateAccChats) {
             const filePath = `${eventData.orgId}/${chatKey.split("-")[0]}/${
@@ -979,10 +1000,10 @@ exports.webhookProcessor = async (req, res) => {
                         "completed",
                         startTime
                     );
-                    sendDiscordMessage(
-                        "Time taken",
-                        `Time taken: ${(Date.now() - startTime) / 1000}s`
-                    );
+                    //sendDiscordMessage(
+                        // "Time taken",
+                        // `Time taken: ${(Date.now() - startTime) / 1000}s`
+                    // );
                 } else {
                     throw new Error(
                         "Unacknowledged event with messageId: " +
@@ -1000,7 +1021,7 @@ exports.webhookProcessor = async (req, res) => {
                     "error"
                 );
             });
-        sendDiscordMessage("Total calls", ++count);
+        // sendDiscordMessage("Total calls", ++count);
         return res.status(200).send("Event Captured");
     } catch (error) {
         sendDiscordMessage(
