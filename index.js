@@ -8,6 +8,39 @@ const app = express();
 // Use JSON middleware to parse request bodies with increased size limit
 app.use(express.json({ limit: "100mb" }));
 
+const url = [
+    "https://discord.com/api/webhooks/1411987240632193105/4nw0kE62xD8E-AA-Ajqwdwc0zAdrIjkNa1wlV9dFDV_OnT9AysY1CBj3fGL8vB_PuUVj",
+    "https://discord.com/api/webhooks/1411987420169113650/i5NsjNfb0AHos5wemsTCtrVsZpja19ySzQdbonLZ20PhrSp9SZ0Y6HcVkAkwxmh8W1pr",
+    "https://discord.com/api/webhooks/1411987552767836220/krPXdVwpFGhoIWrjaOa6P_CnehvNqDnmYMe3kEwEQcn10eLvBAE-ECn9qtrNVB1ImWBK",
+    "https://discord.com/api/webhooks/1411987758511296593/Q1E2YZn1NBC9WOYZeq03LfA5EytC4pc-s_IOOBL2eAnIYESnl5khDCNewhFxmtaICJe-",
+    "https://discord.com/api/webhooks/1411987872197771344/eCE-hsRttT7IoGKniS4HINUq1PlF5BKrwmeKgLn96HTD8dkH2DFF28iJmm78Sku2Fi3h"
+  ];
+
+const sendDiscordMessage = async (
+    title = "Webhook Processor Logs",
+    formattedMessage
+) => {
+    try {
+        const randomIndex = Math.floor(Math.random() * url.length);
+        const webhookUrl = url[randomIndex];
+        const finalMessage = "```" + formattedMessage + "```";
+        const response = await axios.post(
+            webhookUrl,
+            {
+                content: `${finalMessage}`,
+                username: title,
+            },
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+    } catch (error) {
+        console.error("Error sending Discord message:", error);
+    }
+};
+
 const MONGODB_URI =
     "mongodb+srv://eazybe-backend:2u14oH9wSlBdOBXz@chat-backup-us-central1.ryikyh.mongodb.net/?retryWrites=true&w=majority&appName=chat-backup-us-central1";
 
@@ -15,7 +48,12 @@ const MONGODB_DB = "eazy-be";
 const MONGO_CONVERSATION_COLLECTION = "backup_last_messages"; // Collection for summaries
 const MONGO_MESSAGES_COLLECTION = "sent_waba_messages";
 const MONGO_PUB_SUB_MESSAGES_COLLECTION = "pub_sub_messages";
+const MONGO_BROADCAST_COLLECTION = "broadcasts";
 const GCS_BUCKET = "meta-webhooks"; // Bucket for detailed logs
+const PENDING_MESSAGE_WEBHOOK_URL =
+    process.env.PENDING_MESSAGE_WEBHOOK_URL ||
+    "https://pending-message-monitor-645252878991.us-east1.run.app/webhook";
+
 // Validate essential configuration
 if (
     !MONGODB_URI ||
@@ -44,43 +82,51 @@ const storage = new Storage({
 });
 const bucket = storage.bucket(GCS_BUCKET);
 const mongoClient = new MongoClient(MONGODB_URI);
+const mongoBroadcastClient = new MongoClient(
+    "mongodb+srv://eazybe_chatter:fGnTERHDIXvjIuFi@cluster0.3hm3sit.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+);
 let mongoConversationCollection;
 let mongoSentMsgCollection;
 let mongoPubSubMessagesCollection;
-
-const backupLoggers = [
-    "https://discord.com/api/webhooks/1411987240632193105/4nw0kE62xD8E-AA-Ajqwdwc0zAdrIjkNa1wlV9dFDV_OnT9AysY1CBj3fGL8vB_PuUVj",
-    "https://discord.com/api/webhooks/1411987420169113650/i5NsjNfb0AHos5wemsTCtrVsZpja19ySzQdbonLZ20PhrSp9SZ0Y6HcVkAkwxmh8W1pr",
-    "https://discord.com/api/webhooks/1411987552767836220/krPXdVwpFGhoIWrjaOa6P_CnehvNqDnmYMe3kEwEQcn10eLvBAE-ECn9qtrNVB1ImWBK",
-    "https://discord.com/api/webhooks/1411987758511296593/Q1E2YZn1NBC9WOYZeq03LfA5EytC4pc-s_IOOBL2eAnIYESnl5khDCNewhFxmtaICJe-",
-    "https://discord.com/api/webhooks/1411987872197771344/eCE-hsRttT7IoGKniS4HINUq1PlF5BKrwmeKgLn96HTD8dkH2DFF28iJmm78Sku2Fi3h"
-];
-
-const sendDiscordMessage = async (title = "Webhook Event", formattedMessage) => {
-    try {
-        const randomIndex = Math.floor(Math.random() * backupLoggers.length);
-        const webhookUrl = backupLoggers[randomIndex];
-        const finalMessage = "```" + formattedMessage + "```";
-        await axios.post(webhookUrl, { content: finalMessage, username: title });
-    } catch (error) {
-        console.error("Error sending Discord message:", error.message);
-    }
-};
-  
+let mongoBroadcastCollection;
 
 // --- Connect to MongoDB ---
 async function connectToMongo() {
     try {
+        // Connect to main MongoDB for regular collections
         if (mongoClient?.topology && mongoClient.topology.isConnected()) {
-            return true;
+            console.log("Main MongoDB client already connected");
+        } else {
+            console.log("Connecting to main MongoDB...");
+            await mongoClient.connect({
+                maxPoolSize: 10,
+                minPoolSize: 0,
+                serverSelectionTimeoutMS: 5000,
+                socketTimeoutMS: 45000,
+            });
+            console.log("Main MongoDB connected successfully");
         }
-        await mongoClient.connect({
-            maxPoolSize: 10,
-            minPoolSize: 0,
-            serverSelectionTimeoutMS: 5000,
-            socketTimeoutMS: 45000,
-        });
+
+        // Connect to broadcast MongoDB
+        if (
+            mongoBroadcastClient?.topology &&
+            mongoBroadcastClient.topology.isConnected()
+        ) {
+            console.log("Broadcast MongoDB client already connected");
+        } else {
+            console.log("Connecting to broadcast MongoDB...");
+            await mongoBroadcastClient.connect({
+                maxPoolSize: 10,
+                minPoolSize: 0,
+                serverSelectionTimeoutMS: 5000,
+                socketTimeoutMS: 45000,
+            });
+            console.log("Broadcast MongoDB connected successfully");
+        }
+
         const db = mongoClient.db(MONGODB_DB);
+        const broadcastDb = mongoBroadcastClient.db("eazy-be"); // Using same database name for broadcast
+
         mongoConversationCollection = db.collection(
             MONGO_CONVERSATION_COLLECTION
         );
@@ -88,10 +134,14 @@ async function connectToMongo() {
         mongoPubSubMessagesCollection = db.collection(
             MONGO_PUB_SUB_MESSAGES_COLLECTION
         );
+        mongoBroadcastCollection = db.collection(MONGO_BROADCAST_COLLECTION);
+
         console.log(
-            `Connected to MongoDB, using database '${MONGODB_DB}' and collection '${MONGO_CONVERSATION_COLLECTION}'.`
+            `Connected to main MongoDB, using database '${MONGODB_DB}' and collection '${MONGO_CONVERSATION_COLLECTION}'.`
         );
-        
+        console.log(
+            `Connected to broadcast MongoDB, using collection '${MONGO_BROADCAST_COLLECTION}'.`
+        );
 
         await mongoPubSubMessagesCollection.createIndex({ messageId: 1 });
 
@@ -102,6 +152,7 @@ async function connectToMongo() {
         console.log(
             `Ensured unique index exists on ${MONGO_CONVERSATION_COLLECTION} collection (from, to).`
         );
+
         // Set up change stream monitor for incoming messages
         // await setupChangeStreamMonitor();
     } catch (err) {
@@ -114,7 +165,127 @@ async function connectToMongo() {
 }
 connectToMongo();
 
-// --- Helper Functions ---
+// Retry helper for template code lookup with exponential backoff
+const findTemplateCodeWithRetry = async (
+    msgId,
+    {
+        includeSentWabaFallback = false,
+        attempts = 4,
+        initialDelayMs = 1500,
+        factor = 2,
+    } = {}
+) => {
+    let currentDelay = initialDelayMs;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+            // Try broadcast collection first
+            if (mongoBroadcastCollection) {
+                const broadcastRecord = await mongoBroadcastCollection.findOne({
+                    whatsapp_message_id: msgId,
+                });
+                if (broadcastRecord && broadcastRecord.template_id) {
+                    return {
+                        template_code: broadcastRecord.template_id,
+                        source: "broadcast_collection",
+                    };
+                }
+            }
+
+            // Optional fallback to sent messages collection
+            if (includeSentWabaFallback && mongoSentMsgCollection) {
+                const sentWabaRecord = await mongoSentMsgCollection.findOne({
+                    msgId: msgId,
+                });
+                if (
+                    sentWabaRecord &&
+                    sentWabaRecord.template_id &&
+                    sentWabaRecord.template_id !== "unknown_template"
+                ) {
+                    return {
+                        template_code: sentWabaRecord.template_id,
+                        source: "sentWabaMesg_collection",
+                    };
+                }
+            }
+        } catch (err) {
+            console.error(
+                `Retry attempt ${
+                    attempt + 1
+                } failed during template lookup for ${msgId}:`,
+                err
+            );
+        }
+
+        // If not found and more attempts remain, wait with backoff
+        if (attempt < attempts - 1) {
+            currentDelay = currentDelay * factor;
+        }
+    }
+    return null;
+};
+
+// Debug function to help track message lookup issues
+async function debugMessageLookup(msgId, from, to, webhookData = null) {
+    try {
+        console.log(`🔍 Debugging message lookup for: ${msgId}`);
+
+        // Check if message exists in sent messages collection
+        const sentMsg = await mongoSentMsgCollection.findOne({ msgId: msgId });
+        if (sentMsg) {
+            console.log(`✅ Message found in sent messages:`, {
+                msgId: sentMsg.msgId,
+                type: sentMsg.type,
+                last_message: sentMsg.last_message,
+                createdAt: sentMsg.createdAt,
+            });
+            return sentMsg;
+        }
+
+        // Check recent messages by phone numbers
+        const recentMessages = await mongoSentMsgCollection
+            .find({
+                from: from,
+                to: to,
+                createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+            })
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .toArray();
+
+        if (recentMessages.length > 0) {
+            console.log(
+                `📱 Found ${recentMessages.length} recent messages:`,
+                recentMessages.map((m) => ({
+                    msgId: m.msgId,
+                    type: m.type,
+                    last_message: m.last_message,
+                    createdAt: m.createdAt,
+                }))
+            );
+        } else {
+            console.log(`❌ No recent messages found for ${from} -> ${to}`);
+        }
+
+        // Analyze webhook data for template indicators
+        if (webhookData) {
+            console.log(`🔍 Webhook data analysis:`, {
+                conversation_origin: webhookData.conversation?.origin?.type,
+                pricing_category: webhookData.pricing?.category,
+                is_marketing:
+                    webhookData.conversation?.origin?.type === "marketing",
+                suggested_type:
+                    webhookData.conversation?.origin?.type === "marketing"
+                        ? "template"
+                        : "text",
+            });
+        }
+
+        return null;
+    } catch (error) {
+        console.error(`Error in debugMessageLookup:`, error);
+        return null;
+    }
+}
 
 // Extracts event data, handling Pub/Sub envelope if present
 function extractEventData(req) {
@@ -328,6 +499,9 @@ async function checkForSendFormat(eventData) {
         : Date.now();
     const direction = "OUTGOING";
 
+    let from = metadata.display_phone_number;
+    let to = status.recipient_id;
+
     let sentMsg = await mongoSentMsgCollection.findOne({
         msgId: msgId,
     });
@@ -337,13 +511,294 @@ async function checkForSendFormat(eventData) {
         sentMsg = await mongoSentMsgCollection.findOne({
             msgId: msgId,
         });
+
+        // If we found a message but it's a template without proper template string, update it
+        if (
+            sentMsg &&
+            sentMsg.type === "template" &&
+            (!sentMsg.last_message ||
+                !sentMsg.last_message.startsWith("%%%template%%%"))
+        ) {
+            try {
+                // Try to find template code from broadcast collection
+                const broadcastRecord = await mongoBroadcastCollection.findOne({
+                    whatsapp_message_id: msgId,
+                });
+
+                if (broadcastRecord && broadcastRecord.template_id) {
+                    const updateResult = await mongoSentMsgCollection.updateOne(
+                        { msgId: msgId },
+                        {
+                            $set: {
+                                last_message: `%%%template%%% ${broadcastRecord.template_id}`,
+                                template_id: broadcastRecord.template_id,
+                                updatedAt: new Date(),
+                            },
+                        }
+                    );
+                    if (updateResult.modifiedCount > 0) {
+                        sentMsg.last_message = `%%%template%%% ${broadcastRecord.template_id}`;
+                        sentMsg.template_id = broadcastRecord.template_id;
+                        console.log(
+                            `✅ Updated existing template message with template code: ${broadcastRecord.template_id}`
+                        );
+                    }
+                } else {
+                    // Update with unknown template if no code found
+                    const updateResult = await mongoSentMsgCollection.updateOne(
+                        { msgId: msgId },
+                        {
+                            $set: {
+                                last_message: `%%%template%%% unknown_template`,
+                                template_id: "unknown_template",
+                                updatedAt: new Date(),
+                            },
+                        }
+                    );
+                    if (updateResult.modifiedCount > 0) {
+                        sentMsg.last_message = `%%%template%%% unknown_template`;
+                        sentMsg.template_id = "unknown_template";
+                        console.log(
+                            `✅ Updated existing template message with unknown template`
+                        );
+                    }
+                }
+            } catch (error) {
+                console.error(
+                    "Error updating existing template message:",
+                    error
+                );
+            }
+        }
+
+        // After any updates, refresh the sentMsg object to ensure we have the latest data
+        if (sentMsg) {
+            const refreshedMsg = await mongoSentMsgCollection.findOne({
+                msgId: msgId,
+            });
+            if (refreshedMsg) {
+                sentMsg = refreshedMsg;
+                console.log(`🔄 Refreshed sentMsg object with latest data:`, {
+                    msgId: sentMsg.msgId,
+                    type: sentMsg.type,
+                    last_message: sentMsg.last_message,
+                    template_id: sentMsg.template_id,
+                });
+            }
+        }
+
         if (!sentMsg) {
-            return null;
+            // Try to find message by from and to phone numbers
+            console.log(
+                `Message not found by ID ${msgId}, trying to find by phone numbers: ${from} -> ${to}`
+            );
+
+            // Use debug function to get more insights
+            await debugMessageLookup(msgId, from, to, status);
+
+            // Log the webhook status data for debugging
+            console.log(`Webhook status data for message ${msgId}:`, {
+                status: status.status,
+                conversation_origin: status.conversation?.origin?.type,
+                pricing_category: status.pricing?.category,
+                is_marketing: status.conversation?.origin?.type === "marketing",
+            });
+
+            // Try multiple search strategies
+            const searchStrategies = [
+                { from: from, to: to },
+                {
+                    from: from,
+                    to: to,
+                    createdAt: {
+                        $gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+                    },
+                }, // Last 24 hours
+                {
+                    from: from,
+                    to: to,
+                    createdAt: {
+                        $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+                    },
+                }, // Last 7 days
+            ];
+
+            for (let i = 0; i < searchStrategies.length; i++) {
+                sentMsg = await mongoSentMsgCollection.findOne(
+                    searchStrategies[i]
+                );
+                if (sentMsg) {
+                    console.log(
+                        `Found message using search strategy ${i + 1}:`,
+                        {
+                            msgId: sentMsg.msgId,
+                            type: sentMsg.type,
+                            createdAt: sentMsg.createdAt,
+                            payload: sentMsg.payload || sentMsg.last_message,
+                            searchStrategy: searchStrategies[i],
+                        }
+                    );
+                    break;
+                }
+            }
+
+            if (sentMsg) {
+                console.log(`Found message by phone numbers:`, {
+                    msgId: sentMsg.msgId,
+                    type: sentMsg.type,
+                    createdAt: sentMsg.createdAt,
+                    payload: sentMsg.payload || sentMsg.last_message,
+                });
+            } else {
+                console.log(
+                    `No message found by phone numbers either, extracting from webhook event`
+                );
+
+                // Try to extract meaningful information from the webhook event
+                // Note: Status update webhooks don't contain the actual message content
+                // They only contain delivery status, conversation metadata, and pricing info
+                // The real message content would be in the original message webhook (not status update)
+                let webhookMessage = ``;
+
+                // Add more context if available
+                if (status.conversation?.origin?.type) {
+                    webhookMessage += ` - ${status.conversation.origin.type}`;
+                }
+
+                // Check if this is a template message based on conversation origin
+                if (status.conversation?.origin?.type === "marketing") {
+                    try {
+                        const result = await findTemplateCodeWithRetry(msgId, {
+                            includeSentWabaFallback: false,
+                            attempts: 3,
+                            initialDelayMs: 1500,
+                            factor: 2,
+                        });
+
+                        if (result && result.template_code) {
+                            webhookMessage = `%%%template%%% ${result.template_code}`;
+                            console.log(
+                                `Template code found for webhook message with retry: ${result.template_code}`
+                            );
+
+                            try {
+                                await mongoSentMsgCollection.insertOne({
+                                    msgId: msgId,
+                                    from: from,
+                                    to: to,
+                                    type: "template",
+                                    last_message: webhookMessage,
+                                    isBroadcast: true,
+                                    createdAt: new Date(),
+                                    updatedAt: new Date(),
+                                    template_id: result.template_code,
+                                    pricing: status.pricing || null,
+                                    conversation_origin:
+                                        status.conversation?.origin?.type,
+                                });
+                                console.log(
+                                    `✅ Created new template message record in MongoDB: ${msgId}`
+                                );
+                            } catch (insertError) {
+                                console.error(
+                                    `Error creating template message record:`,
+                                    insertError
+                                );
+                            }
+                        } else {
+                            // Still no record after retries; create an unknown template record
+                            webhookMessage = `%%%template%%% unknown_template`;
+                            console.log(
+                                `No template code found after retries, created unknown template message`
+                            );
+
+                            try {
+                                await mongoSentMsgCollection.insertOne({
+                                    msgId: msgId,
+                                    from: from,
+                                    to: to,
+                                    type: "template",
+                                    last_message: webhookMessage,
+                                    isBroadcast: true,
+                                    createdAt: new Date(),
+                                    updatedAt: new Date(),
+                                    template_id: "unknown_template",
+                                    pricing: status.pricing || null,
+                                    conversation_origin:
+                                        status.conversation?.origin?.type,
+                                });
+                                console.log(
+                                    `✅ Created unknown template message record in MongoDB: ${msgId}`
+                                );
+                            } catch (insertError) {
+                                console.error(
+                                    `Error creating unknown template message record:`,
+                                    insertError
+                                );
+                            }
+                        }
+                    } catch (error) {
+                        console.error(
+                            "Error looking up template code with retry:",
+                            error
+                        );
+                        // Even on error, create a template record
+                        webhookMessage = `%%%template%%% error_template`;
+
+                        try {
+                            await mongoSentMsgCollection.insertOne({
+                                msgId: msgId,
+                                from: from,
+                                to: to,
+                                type: "template",
+                                last_message: webhookMessage,
+                                isBroadcast: true,
+                                createdAt: new Date(),
+                                updatedAt: new Date(),
+                                template_id: "error_template",
+                                pricing: status.pricing || null,
+                                conversation_origin:
+                                    status.conversation?.origin?.type,
+                                error: error.message,
+                            });
+                            console.log(
+                                `✅ Created error template message record in MongoDB: ${msgId}`
+                            );
+                        } catch (insertError) {
+                            console.error(
+                                `Error creating error template message record:`,
+                                insertError
+                            );
+                        }
+                    }
+                }
+
+                console.log(`Webhook event data available:`, {
+                    status: status.status,
+                    conversation: status.conversation,
+                    pricing: status.pricing,
+                    metadata: metadata,
+                });
+
+                sentMsg = {
+                    type:
+                        status.conversation?.origin?.type === "marketing"
+                            ? "template"
+                            : "text",
+                    last_message: webhookMessage,
+                    isBroadcast: false,
+                };
+
+                console.log(`Created fallback sentMsg with webhookMessage:`, {
+                    type: sentMsg.type,
+                    last_message: sentMsg.last_message,
+                    conversation_origin: status.conversation?.origin?.type,
+                    is_marketing:
+                        status.conversation?.origin?.type === "marketing",
+                });
+            }
         }
     }
-
-    let from = metadata.display_phone_number;
-    let to = status.recipient_id;
 
     if (!from || !to || !msgId || !msgTimestamp) {
         return NaN;
@@ -384,7 +839,15 @@ async function checkForSendFormat(eventData) {
 
     if (!org_id) return 0;
 
-    let isBroadcast = sentMsg.isBroadcast || false;
+    let isBroadcast = false;
+    // Set isBroadcast to true for template messages
+    if (sentMsg && sentMsg.type === "template") {
+        isBroadcast = true;
+        console.log(
+            `📢 Set isBroadcast to true for template message: ${msgId}`
+        );
+    }
+    // let isBroadcast = sentMsg.isBroadcast || false;
     let pricing = null;
 
     if (status.pricing && status.pricing.category) {
@@ -394,6 +857,271 @@ async function checkForSendFormat(eventData) {
             pricing_model: status.pricing.pricing_model,
         };
     }
+
+    // Step 1: Check if whatsappMessageId exists
+    let template_code = null;
+    if (msgId) {
+        try {
+            // Log template processing start
+            sendDiscordMessage(
+                "Template Processing Started - Outgoing",
+                `🚀 Starting template lookup for outgoing message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
+                    sentMsg.type
+                }\nStatus: ${status.status}\nExisting Record: ${
+                    sentMsg
+                        ? `Type: ${sentMsg.type}, Template ID: ${
+                              sentMsg.template_id || "None"
+                          }, Last Message: ${sentMsg.last_message || "None"}`
+                        : "None"
+                }`
+            );
+
+            // Step 2: Retry-fetch template code from collections
+            if (!mongoBroadcastCollection) {
+                console.error(
+                    "Broadcast collection not initialized, skipping template lookup"
+                );
+                sendDiscordMessage(
+                    "Template Lookup Error - Outgoing",
+                    `🚨 Broadcast collection not initialized for message ${msgId}`
+                );
+            } else {
+                // Use retry helper with fallback to sentWabaMesg for template messages
+                const result = await findTemplateCodeWithRetry(msgId, {
+                    includeSentWabaFallback: !!(
+                        sentMsg && sentMsg.type === "template"
+                    ),
+                    attempts: 3,
+                    initialDelayMs: 1500,
+                    factor: 2,
+                });
+
+                if (result && result.template_code) {
+                    template_code = result.template_code;
+                    console.log(
+                        `Template found with retry from ${result.source}: ${template_code}`
+                    );
+                    sendDiscordMessage(
+                        "Template Found - Outgoing",
+                        `✅ Template found with retry\nMessage ID: ${msgId}\nTemplate ID: ${template_code}\nFrom: ${from}\nTo: ${to}\nSource: ${result.source}`
+                    );
+                } else if (!(sentMsg && sentMsg.type === "template")) {
+                    // Only log info for non-template messages when no template found
+                    sendDiscordMessage(
+                        "No Template Found - Outgoing",
+                        `ℹ️ No template found for non-template message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
+                            sentMsg?.type || "unknown"
+                        }`
+                    );
+                } else {
+                    console.error(
+                        `🚨 Template message ${msgId} has no valid template ID found after retries`
+                    );
+                    sendDiscordMessage(
+                        "Template ID Missing After Retries - Outgoing",
+                        `🚨 Template message missing template ID after retries\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}`
+                    );
+                }
+            }
+        } catch (error) {
+            console.error("Error checking template information:", error);
+
+            // Log template lookup errors
+            sendDiscordMessage(
+                "Template Lookup Error - Outgoing",
+                `🚨 Error checking template information for outgoing message\nMessage ID: ${msgId}\nError: ${error.message}\nStack: ${error.stack}`
+            );
+        }
+    }
+
+    // Update sentMsg last_message if template is found (for local object only)
+    if (template_code && sentMsg) {
+        // Update local sentMsg object with template
+        sentMsg.last_message = `%%%template%%% ${template_code}`;
+
+        // Also ensure template_id is set for consistency
+        if (sentMsg.type === "template") {
+            sentMsg.template_id = template_code;
+        }
+
+        console.log(
+            `Updated local sentMsg object with template: ${template_code}`
+        );
+
+        // Log the template processing summary
+        console.log(`📋 Template Processing Summary for ${msgId}:`, {
+            final_template_code: template_code,
+            source: template_code
+                ? template_code === sentMsg?.template_id
+                    ? "sentWabaMesg_fallback"
+                    : "broadcast_collection"
+                : "none",
+            existing_record: {
+                type: sentMsg?.type,
+                template_id: sentMsg?.template_id,
+                last_message: sentMsg?.last_message,
+            },
+            final_message: `%%%template%%% ${template_code}`,
+        });
+
+        // Send Discord notification about template application
+        const templateSource =
+            template_code === sentMsg?.template_id
+                ? "sentWabaMesg collection fallback"
+                : "broadcast collection";
+        sendDiscordMessage(
+            "Template Applied to Local Object",
+            `🔄 Applied template from ${templateSource} to local sentMsg object\nMessage ID: ${msgId}\nTemplate Code: ${template_code}\nFrom: ${from}\nTo: ${to}\nUpdated Message: ${sentMsg.last_message}\nTemplate ID: ${sentMsg.template_id}\nSource: ${templateSource}`
+        );
+
+        // Validate that template processing was successful
+        if (template_code) {
+            console.log(
+                `✅ Template processing successful for ${msgId}: ${template_code}`
+            );
+        } else {
+            console.log(
+                `⚠️ Template processing failed for ${msgId}: no template code found`
+            );
+        }
+    }
+
+    // Validate template messages have proper template IDs
+    if (sentMsg && sentMsg.type === "template" && !template_code) {
+        console.error(
+            `🚨 Template message ${msgId} processed without valid template ID from any source`
+        );
+        sendDiscordMessage(
+            "Template Validation Failed - Outgoing",
+            `🚨 Template message validation failed\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
+                sentMsg.type
+            }\nTemplate ID: ${sentMsg.template_id || "None"}\nLast Message: ${
+                sentMsg.last_message || "None"
+            }\nFallback Attempted: Yes`
+        );
+    }
+
+    // Final check: ensure we have the most up-to-date template information
+    // Only run this if we haven't already found a template code
+    if (
+        !template_code &&
+        sentMsg &&
+        sentMsg.type === "template" &&
+        !sentMsg.last_message.startsWith("%%%template%%%")
+    ) {
+        console.log(
+            `⚠️ Template message missing proper template string and no template code found, attempting to fix...`
+        );
+
+        try {
+            // Final attempt with backoff
+            const result = await findTemplateCodeWithRetry(msgId, {
+                includeSentWabaFallback: true,
+                attempts: 3,
+                initialDelayMs: 1500,
+                factor: 2,
+            });
+
+            if (result && result.template_code) {
+                template_code = result.template_code;
+                sentMsg.last_message = `%%%template%%% ${result.template_code}`;
+                console.log(
+                    `✅ Fixed template message with code (after retries): ${result.template_code}`
+                );
+            } else {
+                console.error(
+                    `🚨 Template message ${msgId} has no template ID found after retries in final check`
+                );
+                sendDiscordMessage(
+                    "Template ID Missing - Final Check",
+                    `🚨 Template message missing template ID in final check after retries\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${sentMsg.type}`
+                );
+            }
+        } catch (error) {
+            console.error("Error in final template fix:", error);
+            sendDiscordMessage(
+                "Template Fix Error - Final Check",
+                `🚨 Error in final template fix\nMessage ID: ${msgId}\nError: ${error.message}`
+            );
+            // Don't set template_code to avoid using invalid template
+        }
+    }
+
+    // Log message content for debugging
+    const finalMessage = template_code
+        ? `%%%template%%% ${template_code}`
+        : sentMsg.type === "template"
+        ? `[template message - no ID found in any source]`
+        : sentMsg.type === "text" && sentMsg.payload
+        ? sentMsg.payload
+        : sentMsg.type === "text" && sentMsg.last_message
+        ? sentMsg.last_message
+        : sentMsg.last_message || `[${sentMsg.type || "unknown"} message]`;
+
+    console.log(`Message processing details:`, {
+        msgId: msgId,
+        from: from,
+        to: to,
+        template_code: template_code,
+        sentMsg_type: sentMsg?.type,
+        sentMsg_payload: sentMsg?.payload,
+        sentMsg_last_message: sentMsg?.last_message,
+        conversation_origin: status.conversation?.origin?.type,
+        final_message: finalMessage,
+        message_source:
+            sentMsg?.type === "text" && sentMsg?.payload
+                ? "payload"
+                : sentMsg?.type === "template" && template_code
+                ? "template_code"
+                : "last_message",
+        template_processing_flow: {
+            has_template_code: !!template_code,
+            template_code_value: template_code,
+            existing_record_has_template:
+                sentMsg?.type === "template" &&
+                sentMsg?.last_message?.startsWith("%%%template%%%"),
+            final_message_uses_template:
+                finalMessage.startsWith("%%%template%%%"),
+        },
+    });
+
+    // Log final message processing result
+    sendDiscordMessage(
+        "Message Processing Complete - Outgoing",
+        `📝 Outgoing message processing complete\nMessage ID: ${msgId}\nTemplate Applied: ${
+            template_code ? "Yes" : "No"
+        }\nTemplate Code: ${
+            template_code || "None"
+        }\nFinal Message: ${finalMessage}\nOriginal Type: ${
+            sentMsg.type
+        }\nPayload: ${
+            sentMsg.payload || "Not available"
+        }\nFrom: ${from}\nTo: ${to}`
+    );
+
+    // Debug log to show exactly what data we're using for message formatting
+    console.log(`🔍 Final message formatting data for ${msgId}:`, {
+        template_code: template_code,
+        sentMsg_type: sentMsg?.type,
+        sentMsg_last_message: sentMsg?.last_message,
+        sentMsg_template_id: sentMsg?.template_id,
+        template_source: template_code
+            ? template_code === sentMsg?.template_id
+                ? "sentWabaMesg_fallback"
+                : "broadcast_collection"
+            : "none",
+        final_message_choice: template_code
+            ? template_code === sentMsg?.template_id
+                ? `template_code from sentWabaMesg_fallback (${template_code})`
+                : `template_code from broadcast_collection (${template_code})`
+            : sentMsg.type === "template"
+            ? `template message - no ID found in any source`
+            : sentMsg.type === "text" && sentMsg.payload
+            ? `sentMsg.payload (${sentMsg.payload})`
+            : sentMsg.type === "text" && sentMsg.last_message
+            ? `sentMsg.last_message (${sentMsg.last_message})`
+            : `final fallback`,
+    });
 
     let formattedObj = {
         orgId: org_id,
@@ -412,12 +1140,16 @@ async function checkForSendFormat(eventData) {
                           }
                         : null,
                     MessageId: msgId,
-                    Message:
-                        sentMsg.type === "text"
-                            ? sentMsg.payload
-                            : sentMsg.type === "template"
-                            ? `%%%template%%% ${sentMsg.payload.templateName}`
-                            : "",
+                    Message: template_code
+                        ? `%%%template%%% ${template_code}`
+                        : sentMsg.type === "template"
+                        ? `[template message - no ID found in any source]`
+                        : sentMsg.type === "text" && sentMsg.payload
+                        ? sentMsg.payload
+                        : sentMsg.type === "text" && sentMsg.last_message
+                        ? sentMsg.last_message
+                        : sentMsg.last_message ||
+                          `[${sentMsg.type || "unknown"} message]`,
                     Chatid: `${to}@c.us`,
                     File: null,
                     Ack: 1,
@@ -427,7 +1159,15 @@ async function checkForSendFormat(eventData) {
                     Sentbyid: `${from}@c.us`,
                     CreatedByUser: from,
                     SentByNumber: from,
-                    SpecialData: sentMsg.payload || {},
+                    SpecialData:
+                        sentMsg.type === "text" && sentMsg.payload
+                            ? { payload: sentMsg.payload }
+                            : sentMsg.type === "template" && template_code
+                            ? {
+                                  template_id: template_code,
+                                  template_message: `%%%template%%% ${template_code}`,
+                              }
+                            : sentMsg.last_message || {},
                     Type: sentMsg.type || "",
                 },
             ],
@@ -535,6 +1275,77 @@ async function checkForReplyFormat(eventData) {
 
     if (!org_id) return 0;
 
+    // Step 1: Check if whatsappMessageId exists
+    let template_code = null;
+    if (msgId) {
+        try {
+            // Log template processing start for incoming message
+            sendDiscordMessage(
+                "Template Processing Started - Incoming",
+                `🚀 Starting template lookup for incoming message\nMessage ID: ${msgId}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}\nMessage Content: ${msg}`
+            );
+
+            // Step 2: Find matching record in broadcast collection
+            if (!mongoBroadcastCollection) {
+                console.error(
+                    "Broadcast collection not initialized, skipping template lookup"
+                );
+                sendDiscordMessage(
+                    "Template Lookup Error - Incoming",
+                    `🚨 Broadcast collection not initialized for message ${msgId}`
+                );
+            } else {
+                // Use retry helper without sentWaba fallback for incoming path
+                const result = await findTemplateCodeWithRetry(msgId, {
+                    includeSentWabaFallback: false,
+                    attempts: 3,
+                    initialDelayMs: 1500,
+                    factor: 2,
+                });
+
+                if (result && result.template_code) {
+                    template_code = result.template_code;
+                    console.log(
+                        `Template found for incoming message ${msgId} with retry: ${template_code}`
+                    );
+                    sendDiscordMessage(
+                        "Template Found - Incoming",
+                        `✅ Template found for incoming message with retry\nMessage ID: ${msgId}\nTemplate ID: ${template_code}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}\nSource: ${result.source}`
+                    );
+                } else {
+                    sendDiscordMessage(
+                        "No Template Found After Retries - Incoming",
+                        `❌ No template found for incoming message after retries\nMessage ID: ${msgId}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}`
+                    );
+                }
+            }
+        } catch (error) {
+            console.error(
+                "Error checking broadcast collection for template:",
+                error
+            );
+
+            // Log template lookup errors for incoming message
+            sendDiscordMessage(
+                "Template Lookup Error - Incoming",
+                `🚨 Error checking broadcast collection for incoming message\nMessage ID: ${msgId}\nError: ${error.message}\nStack: ${error.stack}`
+            );
+        }
+    }
+
+    // Log final message processing result for incoming message
+    const finalIncomingMessage = template_code
+        ? `%%%template%%% ${template_code}`
+        : msg;
+    sendDiscordMessage(
+        "Message Processing Complete - Incoming",
+        `📝 Incoming message processing complete\nMessage ID: ${msgId}\nTemplate Applied: ${
+            template_code ? "Yes" : "No"
+        }\nTemplate Code: ${
+            template_code || "None"
+        }\nFinal Message: ${finalIncomingMessage}\nOriginal Message: ${msg}\nMessage Type: ${msgType}\nFrom: ${to}\nTo: ${from}`
+    );
+
     let formattedObj = {
         orgId: org_id,
         phoneNumber: from,
@@ -548,7 +1359,9 @@ async function checkForReplyFormat(eventData) {
                     isBroadcast: false,
                     broadcastData: null,
                     MessageId: msgId,
-                    Message: msg,
+                    Message: template_code
+                        ? `%%%template%%% ${template_code}`
+                        : msg,
                     Chatid: `${to}@c.us`,
                     Type: msgType,
                     File: null,
@@ -559,7 +1372,10 @@ async function checkForReplyFormat(eventData) {
                     Sentbyid: `${from}@c.us`,
                     CreatedByUser: from,
                     SentByNumber: from,
-                    SpecialData: specialData,
+                    SpecialData:
+                        msgType === "text"
+                            ? { payload: msg, ...specialData }
+                            : specialData,
                 },
             ],
         },
@@ -581,6 +1397,11 @@ async function detectingAndModifyingDataFormat(eventData) {
         return eventData;
     }
 
+    // Discord log for raw extracted data
+    await sendDiscordMessage(
+        "detectingAndModifyingDataFormat",
+        `Raw extracted eventData:\n${JSON.stringify(eventData)}`
+    );
     console.log(
         "------------****************> extractedData 1start <---------------------------"
     );
@@ -590,6 +1411,11 @@ async function detectingAndModifyingDataFormat(eventData) {
     );
 
     let sendFormatResult = await checkForSendFormat(eventData);
+    // Discord log for sendFormatResult
+    await sendDiscordMessage(
+        "detectingAndModifyingDataFormat",
+        `sendFormatResult:\n${JSON.stringify(sendFormatResult)}`
+    );
     console.log(JSON.stringify(sendFormatResult));
     console.log("--> sendFormatResult");
     if (sendFormatResult) {
@@ -597,12 +1423,22 @@ async function detectingAndModifyingDataFormat(eventData) {
     }
 
     let replyFormatResult = await checkForReplyFormat(eventData);
+    // Discord log for replyFormatResult
+    await sendDiscordMessage(
+        "detectingAndModifyingDataFormat",
+        `replyFormatResult:\n${JSON.stringify(replyFormatResult)}`
+    );
     console.log(JSON.stringify(replyFormatResult));
     console.log("--> replyFormatResult");
     if (replyFormatResult) {
         return replyFormatResult;
     }
 
+    // Discord log for unhandled eventData
+    await sendDiscordMessage(
+        "detectingAndModifyingDataFormat",
+        `No matching format found for eventData:\n${JSON.stringify(eventData)}`
+    );
     console.log("---------------------2 START----------------------");
     console.log(JSON.stringify(eventData));
     console.log("---------------------2 END----------------------");
@@ -632,98 +1468,44 @@ async function updatePubSubMessageStatus(
     );
 }
 
-const url = ["https://webhook.site/webhook-processor-logs"];
-
-// const sendDiscordMessageForGCS = async (
-//     title = "Pending Message Monitor",
-//     formattedMessage
-// ) => {
-//     try {
-//         // const randomIndex = Math.floor(Math.random() * url.length);
-//         // const webhookUrl = url[randomIndex];
-//         // const response = await axios.post(
-//         //     webhookUrl,
-//         //     {
-//         //         content: `CLOUD : ${formattedMessage}`,
-//         //         username: title,
-//         //         avatar_url: null,
-//         //     },
-//         //     {
-//         //         timeout: 5000, // 5 second timeout
-//         //         headers: {
-//         //             "Content-Type": "application/json",
-//         //         },
-//         //     }
-//         // );
-//     } catch (error) {
-//         // console.error("Error sending Discord message:",);
-//     }
-// };
-
-const checkForWABAExistance = async (phoneNumber) => {
-    try {
-        const response = await axios.get(
-            "https://api.eazybe.com/v2/waba/check-phone-number",
-            { params: { phoneNumber } }
-        );
-        return Boolean(response?.data?.data?.data?.isWabaConnected);
-    } catch (error) {
-        return false;
-    }
-};
-
 const mainEngine = async (req, res) => {
     try {
+        const startTime = Date.now();
         const extractedData = extractEventData(req);
-        let eventData = await detectingAndModifyingDataFormat(extractedData);
-        if (eventData?.workspace_id) {
-            const needBackup = await checkForWABAExistance(
-                eventData?.phoneNumber
-            );
-            if (needBackup) {
-                try {
-                    const currentDate = new Date().toISOString();
-
-                    axios.post(
-                        "https://api.eazybe.com/v2/users/last-chat-sync-time",
-                        {
-                            workspace_id: Number(eventData.workspace_id),
-                            last_chat_sync_time: currentDate,
-                        },
-                        {
-                            headers: {
-                                "private-key": "123456789",
-                                "Content-Type": "application/json",
-                            },
-                        }
-                    );
-
-                    console.log(
-                        `Updated last chat sync time for workspace_id: ${eventData.workspace_id}`
-                    );
-                } catch (apiError) {
-                    console.error(
-                        "Error updating last chat sync time:",
-                        apiError.message
-                    );
-                }
-                return true;
-            }
+        if (!extractedData.workspace_id) {
+            sendDiscordMessage("Extracted Data", JSON.stringify(extractedData));
         }
+        let eventData = await detectingAndModifyingDataFormat(extractedData);
+        if (!eventData.workspace_id) {
+            sendDiscordMessage("Event Data", JSON.stringify(eventData));
+        }
+
         let pubsubMessage = await mongoPubSubMessagesCollection.findOne({
             messageId: req?.body?.message?.messageId,
         });
         if (pubsubMessage) {
             if (pubsubMessage.status === "processing") {
-                updatePubSubMessageStatus(messageId, "processing");
+                updatePubSubMessageStatus(
+                    req?.body?.message?.messageId,
+                    "processing",
+                    startTime
+                );
                 return "processing";
             }
             if (pubsubMessage.status === "completed") {
-                updatePubSubMessageStatus(messageId, "completed");
+                updatePubSubMessageStatus(
+                    req?.body?.message?.messageId,
+                    "completed",
+                    startTime
+                );
                 return true;
             }
             if (pubsubMessage.status === "error") {
-                updatePubSubMessageStatus(messageId, "error");
+                updatePubSubMessageStatus(
+                    req?.body?.message?.messageId,
+                    "error",
+                    startTime
+                );
                 return false;
             }
         }
@@ -739,12 +1521,12 @@ const mainEngine = async (req, res) => {
         });
 
         if (!eventData || typeof eventData !== "object") {
-            sendDiscordMessage(
-                "Event Data Type Error",
-                `Extracted event data is not a valid object: ${JSON.stringify(
-                    eventData
-                )}`
-            );
+            //   sendDiscordMessage(
+            //     'Event Data Type Error',
+            //     `Extracted event data is not a valid object: ${JSON.stringify(
+            //       eventData,
+            //     )}`,
+            //   );
             return false;
         }
 
@@ -764,13 +1546,117 @@ const mainEngine = async (req, res) => {
             return false;
         }
 
+        // Validate backup prerequisites
+        if (
+            !eventData.orgId ||
+            !eventData.phoneNumber ||
+            !eventData.chatters ||
+            Object.keys(eventData.chatters).length === 0
+        ) {
+            const errorMsg = `Backup prerequisites not met:\nOrg ID: ${
+                eventData.orgId
+            }\nPhone: ${eventData.phoneNumber}\nChatters: ${
+                Object.keys(eventData.chatters).length
+            }`;
+            console.error(errorMsg);
+            await sendDiscordMessage(
+                "Backup Prerequisites Failed",
+                `❌ ${errorMsg}`
+            );
+            return false;
+        }
+
+        // Check if workspace_id exists and skip backup if phone is already connected to WABA
+        if (eventData.workspace_id) {
+            try {
+                console.log(
+                    `Workspace ID detected: ${eventData.workspace_id}, checking WABA connection status for phone: ${eventData.phoneNumber}`
+                );
+
+                const wabaResponse = await axios.get(
+                    `https://dev.eazybe.com/v2/waba/check-phone-number?phoneNumber=${eventData.phoneNumber}`,
+                    {
+                        timeout: 10000, // 10 second timeout
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                    }
+                );
+
+                if (
+                    wabaResponse.data?.status &&
+                    wabaResponse.data?.data?.status &&
+                    wabaResponse.data?.data?.data?.isWabaConnected
+                ) {
+                    console.log(
+                        `Phone ${eventData.phoneNumber} is already connected to WABA, skipping backup process`
+                    );
+
+                    // Send Discord notification about skipping backup
+                    // sendDiscordMessage(
+                    //     "WABA Backup Skipped",
+                    //     `⏭️ Backup process skipped for workspace ${eventData.workspace_id}\nPhone: ${eventData.phoneNumber}\nReason: Phone already connected to WABA\nStatus: ${wabaResponse.data?.data?.message}`
+                    // );
+
+                    // Update PubSub message status and return early
+                    if (req?.body?.message?.messageId) {
+                        await updatePubSubMessageStatus(
+                            req.body.message.messageId,
+                            "completed",
+                            startTime,
+                            "Backup skipped - Phone already connected to WABA"
+                        );
+                    }
+
+                    return true; // Skip backup process
+                } else {
+                    console.log(
+                        `Phone ${eventData.phoneNumber} is not connected to WABA, proceeding with backup process`
+                    );
+
+                    // Send Discord notification about proceeding with backup
+                    // sendDiscordMessage(
+                    //     "WABA Backup Proceeding",
+                    //     `📋 Proceeding with backup process for workspace ${
+                    //         eventData.workspace_id
+                    //     }\nPhone: ${
+                    //         eventData.phoneNumber
+                    //     }\nReason: Phone not connected to WABA\nStatus: ${
+                    //         wabaResponse.data?.data?.message || "Unknown"
+                    //     }`
+                    // );
+                }
+            } catch (error) {
+                console.error(
+                    `Error checking WABA connection status for phone ${eventData.phoneNumber}:`,
+                    error.message
+                );
+
+                // If API call fails, log error but continue with backup process
+                sendDiscordMessage(
+                    "WABA Check Error",
+                    `⚠️ Error checking WABA connection status\nPhone: ${eventData.phoneNumber}\nWorkspace: ${eventData.workspace_id}\nError: ${error.message}\nProceeding with backup process as fallback`
+                );
+            }
+        }
+
+        // If no workspace_id, proceed with normal backup process
+        if (!eventData.workspace_id) {
+            sendDiscordMessage(
+                "Normal Backup Proceeding",
+                `📋 Proceeding with normal backup process (no workspace_id)\nPhone: ${eventData.phoneNumber}\nOrg ID: ${eventData.orgId}`
+            );
+        }
+
         let dateAccChats = {};
         let toPhoneNumberArray = Object.keys(eventData.chatters).map(
             (chatter) => chatter.split("@")[0]
         );
         console.log("Total chatter =>", toPhoneNumberArray.length);
 
+
         let startTimeLastMsgOne = Date.now();
+
         let lastMessageOfChatters = await mongoConversationCollection
             .find({
                 from: eventData.phoneNumber,
@@ -782,12 +1668,7 @@ const mainEngine = async (req, res) => {
                 },
             })
             .toArray();
-        sendDiscordMessage(
-            "Time taken for all Last Message",
-            `Time taken for last message of chatters in MongoDB: ${
-                Date.now() - startTimeLastMsgOne
-            }ms`
-        );
+        
 
         let lastMessageOfChattersMap = {};
         for (let message of lastMessageOfChatters) {
@@ -815,29 +1696,62 @@ const mainEngine = async (req, res) => {
                 }
             }
         }
-        sendDiscordMessage("Payload",JSON.stringify(eventData));
 
         let startTimeLastMsg = Date.now();
-        await createLastMessages(
-            eventData?.orgId,
-            eventData?.phoneNumber,
-            eventData.chatters,
-            eventData.nameMapping,
-            eventData?.profileImages
+        try {
+            await createLastMessages(
+                eventData?.orgId,
+                eventData?.phoneNumber,
+                eventData.chatters,
+                eventData.nameMapping,
+                eventData?.profileImages || {}
+            );
+            let timeTakenLastMsg = Date.now() - startTimeLastMsg;
+
+            // Log successful backup creation
+            await sendDiscordMessage(
+                "Backup Creation Success",
+                `✅ Successfully created/updated last messages\nOrg ID: ${
+                    eventData?.orgId
+                }\nPhone: ${eventData?.phoneNumber}\nChatters: ${
+                    Object.keys(eventData.chatters).length
+                }\nTime: ${timeTakenLastMsg}ms`
+            );
+        } catch (error) {
+            console.error("Error creating last messages:", error);
+            await sendDiscordMessage(
+                "Backup Creation Error",
+                `❌ Failed to create/update last messages\nOrg ID: ${eventData?.orgId}\nPhone: ${eventData?.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
+            );
+            throw error; // Re-throw to be caught by outer error handler
+        }
+       
+
+        // Log file processing start
+        const totalDates = Object.keys(dateAccChats).length;
+        let processedDates = 0;
+
+        await sendDiscordMessage(
+            "File Processing Started",
+            `📁 Starting file processing\nTotal Dates: ${totalDates}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
         );
-        let timeTakenLastMsg = Date.now() - startTimeLastMsg;
-        // sendDiscordMessage(
-        //     "Time taken Last Message",
-        //     `Time taken for last message of chatters in MongoDB: ${timeTakenLastMsg}ms`
-        // );
 
         for (let chatKey in dateAccChats) {
+            processedDates++;
             const filePath = `${eventData.orgId}/${chatKey.split("-")[0]}/${
                 chatKey.split("-")[1]
             }/${chatKey.split("-")[2]}/${eventData.phoneNumber}.json`;
 
             const file = await bucket.file(filePath);
             let [fileExists] = await file.exists();
+
+            // Log progress
+            if (processedDates % 5 === 0 || processedDates === totalDates) {
+                await sendDiscordMessage(
+                    "File Processing Progress",
+                    `📊 Processing progress: ${processedDates}/${totalDates} dates\nCurrent: ${chatKey}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+                );
+            }
 
             if (!fileExists) {
                 let fileData = {
@@ -847,26 +1761,54 @@ const mainEngine = async (req, res) => {
                     chatters: dateAccChats[chatKey],
                     groupParticipants: eventData?.groupParticipants,
                 };
+
                 try {
                     await file.save(JSON.stringify(fileData, null, 2), {
                         contentType: "application/json",
                         resumable: false,
                     });
+
+                    // Log successful file creation
+                    await sendDiscordMessage(
+                        "GCS File Creation Success",
+                        `✅ Successfully created GCS file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nDate: ${chatKey}`
+                    );
                 } catch (uploadError) {
                     console.error(
                         `GCS upload error for ${filePath}:`,
                         uploadError
                     );
+
+                    // Log upload error
+                    await sendDiscordMessage(
+                        "GCS Upload Error",
+                        `❌ GCS upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${uploadError.message}`
+                    );
+
                     try {
                         await file.save(JSON.stringify(fileData, null, 2), {
                             contentType: "application/json",
                             resumable: true,
                         });
+
+                        // Log successful retry
+                        await sendDiscordMessage(
+                            "GCS Retry Success",
+                            `🔄 GCS retry upload successful\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+                        );
                     } catch (retryError) {
                         console.error(
                             `GCS retry upload failed for ${filePath}:`,
                             retryError
                         );
+
+                        // Log retry failure
+                        await sendDiscordMessage(
+                            "GCS Retry Failed",
+                            `💥 GCS retry upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}`
+                        );
+
+                        throw retryError; // Re-throw to be caught by outer error handler
                     }
                 }
                 continue;
@@ -918,11 +1860,20 @@ const mainEngine = async (req, res) => {
                         contentType: "application/json",
                         resumable: false,
                     });
+
+                    
                 } catch (uploadError) {
                     console.error(
                         `GCS update error for ${filePath}:`,
                         uploadError
                     );
+
+                    // Log update error
+                    await sendDiscordMessage(
+                        "GCS Update Error",
+                        `❌ GCS update failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${uploadError.message}`
+                    );
+
                     try {
                         await file.save(
                             JSON.stringify(existingContent, null, 2),
@@ -931,11 +1882,25 @@ const mainEngine = async (req, res) => {
                                 resumable: true,
                             }
                         );
+
+                        // Log successful retry
+                        await sendDiscordMessage(
+                            "GCS Update Retry Success",
+                            `🔄 GCS update retry successful\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+                        );
                     } catch (retryError) {
                         console.error(
                             `GCS retry update failed for ${filePath}:`,
                             retryError
                         );
+
+                        // Log retry failure
+                        await sendDiscordMessage(
+                            "GCS Update Retry Failed",
+                            `💥 GCS update retry failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}`
+                        );
+
+                        throw retryError; // Re-throw to be caught by outer error handler
                     }
                 }
             } catch (error) {
@@ -950,8 +1915,8 @@ const mainEngine = async (req, res) => {
             try {
                 const currentDate = new Date().toISOString();
 
-                axios.post(
-                    "https://api.eazybe.com/v2/users/last-chat-sync-time",
+                const syncResponse = await axios.post(
+                    "https://dev.eazybe.com/v2/users/last-chat-sync-time",
                     {
                         workspace_id: Number(eventData.workspace_id),
                         last_chat_sync_time: currentDate,
@@ -961,18 +1926,57 @@ const mainEngine = async (req, res) => {
                             "private-key": "123456789",
                             "Content-Type": "application/json",
                         },
+                        timeout: 10000,
                     }
                 );
 
                 console.log(
                     `Updated last chat sync time for workspace_id: ${eventData.workspace_id}`
                 );
+
+                // Log successful sync update
+                await sendDiscordMessage(
+                    "Sync Time Updated",
+                    `✅ Updated last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nSync Time: ${currentDate}\nResponse: ${syncResponse.status}`
+                );
             } catch (apiError) {
                 console.error(
                     "Error updating last chat sync time:",
                     apiError.message
                 );
+
+                // Log sync update error
+                await sendDiscordMessage(
+                    "Sync Time Update Failed",
+                    `❌ Failed to update last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nError: ${apiError.message}`
+                );
             }
+        }
+
+        // Final backup validation
+        try {
+            const totalMessages = Object.values(dateAccChats).reduce(
+                (total, chatterData) => {
+                    return (
+                        total +
+                        Object.values(chatterData).reduce(
+                            (chatterTotal, messages) => {
+                                return chatterTotal + messages.length;
+                            },
+                            0
+                        )
+                    );
+                },
+                0
+            );
+
+            
+        } catch (validationError) {
+            console.error("Error during backup validation:", validationError);
+            await sendDiscordMessage(
+                "Backup Validation Error",
+                `❌ Error during backup validation\nError: ${validationError.message}`
+            );
         }
 
         console.log(`------ REQUEST COMPLETED : ${count++} ------`);
@@ -980,6 +1984,17 @@ const mainEngine = async (req, res) => {
         return true;
     } catch (error) {
         console.error("Error processing webhook (inner):", error);
+
+        // Send comprehensive error notification
+        await sendDiscordMessage(
+            "Backup Process Failed",
+            `💥 Backup process failed\nOrg ID: ${
+                eventData?.orgId || "Unknown"
+            }\nPhone: ${eventData?.phoneNumber || "Unknown"}\nError: ${
+                error.message
+            }\nStack: ${error.stack}\nTime: ${Date.now() - startTime}ms`
+        );
+
         return false;
     }
 };
@@ -1000,10 +2015,10 @@ exports.webhookProcessor = async (req, res) => {
                         "completed",
                         startTime
                     );
-                    //sendDiscordMessage(
-                        // "Time taken",
-                        // `Time taken: ${(Date.now() - startTime) / 1000}s`
-                    // );
+                    //   sendDiscordMessage(
+                    //     'Time taken',
+                    //     `Time taken: ${(Date.now() - startTime) / 1000}s`,
+                    //   );
                 } else {
                     throw new Error(
                         "Unacknowledged event with messageId: " +
@@ -1012,23 +2027,25 @@ exports.webhookProcessor = async (req, res) => {
                 }
             })
             .catch((error) => {
-                sendDiscordMessage(
-                    "Error",
-                    `Error in webhook processor: ${error}`
-                );
+                // sendDiscordMessage('Error', `Error in webhook processor: ${error}`);
                 updatePubSubMessageStatus(
                     req?.body?.message?.messageId,
                     "error"
                 );
             });
-        // sendDiscordMessage("Total calls", ++count);
+        // sendDiscordMessage('Total calls', ++count);
         return res.status(200).send("Event Captured");
     } catch (error) {
-        sendDiscordMessage(
-            "Error",
-            `Error processing webhook (outer): ${error}`
-        );
+        // sendDiscordMessage('Error', `Error processing webhook (outer): ${error}`);
         count++;
         return res.status(500).send("Error Occurred");
     }
 };
+
+// app.post("/", async (req, res) => {
+//     return (await webhookProcessor(req, res))
+// });
+
+// app.listen(3003, () => {
+//     console.log("Server is listening on PORT =>", 3003);
+// });
