@@ -170,9 +170,9 @@ const findTemplateCodeWithRetry = async (
     msgId,
     {
         includeSentWabaFallback = false,
-        attempts = 4,
+        attempts = 5,
         initialDelayMs = 1500,
-        factor = 2,
+        factor = 4,
     } = {}
 ) => {
     let currentDelay = initialDelayMs;
@@ -670,9 +670,9 @@ async function checkForSendFormat(eventData) {
                     try {
                         const result = await findTemplateCodeWithRetry(msgId, {
                             includeSentWabaFallback: false,
-                            attempts: 3,
+                            attempts: 5,
                             initialDelayMs: 1500,
-                            factor: 2,
+                            factor: 4,
                         });
 
                         if (result && result.template_code) {
@@ -891,9 +891,9 @@ async function checkForSendFormat(eventData) {
                     includeSentWabaFallback: !!(
                         sentMsg && sentMsg.type === "template"
                     ),
-                    attempts: 3,
+                    attempts: 5,
                     initialDelayMs: 1500,
-                    factor: 2,
+                    factor: 4,
                 });
 
                 if (result && result.template_code) {
@@ -1017,9 +1017,9 @@ async function checkForSendFormat(eventData) {
             // Final attempt with backoff
             const result = await findTemplateCodeWithRetry(msgId, {
                 includeSentWabaFallback: true,
-                attempts: 3,
+                attempts: 5,
                 initialDelayMs: 1500,
-                factor: 2,
+                factor: 4,
             });
 
             if (result && result.template_code) {
@@ -1298,9 +1298,9 @@ async function checkForReplyFormat(eventData) {
                 // Use retry helper without sentWaba fallback for incoming path
                 const result = await findTemplateCodeWithRetry(msgId, {
                     includeSentWabaFallback: false,
-                    attempts: 3,
+                    attempts: 5,
                     initialDelayMs: 1500,
-                    factor: 2,
+                    factor: 4,
                 });
 
                 if (result && result.template_code) {
@@ -1424,10 +1424,6 @@ async function detectingAndModifyingDataFormat(eventData) {
 
     let replyFormatResult = await checkForReplyFormat(eventData);
     // Discord log for replyFormatResult
-    await sendDiscordMessage(
-        "detectingAndModifyingDataFormat",
-        `replyFormatResult:\n${JSON.stringify(replyFormatResult)}`
-    );
     console.log(JSON.stringify(replyFormatResult));
     console.log("--> replyFormatResult");
     if (replyFormatResult) {
@@ -1709,14 +1705,14 @@ const mainEngine = async (req, res) => {
             let timeTakenLastMsg = Date.now() - startTimeLastMsg;
 
             // Log successful backup creation
-            await sendDiscordMessage(
-                "Backup Creation Success",
-                `✅ Successfully created/updated last messages\nOrg ID: ${
-                    eventData?.orgId
-                }\nPhone: ${eventData?.phoneNumber}\nChatters: ${
-                    Object.keys(eventData.chatters).length
-                }\nTime: ${timeTakenLastMsg}ms`
-            );
+            // await sendDiscordMessage(
+            //     "Backup Creation Success",
+            //     `✅ Successfully created/updated last messages\nOrg ID: ${
+            //         eventData?.orgId
+            //     }\nPhone: ${eventData?.phoneNumber}\nChatters: ${
+            //         Object.keys(eventData.chatters).length
+            //     }\nTime: ${timeTakenLastMsg}ms`
+            // );
         } catch (error) {
             console.error("Error creating last messages:", error);
             await sendDiscordMessage(
@@ -1731,10 +1727,10 @@ const mainEngine = async (req, res) => {
         const totalDates = Object.keys(dateAccChats).length;
         let processedDates = 0;
 
-        await sendDiscordMessage(
-            "File Processing Started",
-            `📁 Starting file processing\nTotal Dates: ${totalDates}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
-        );
+        // await sendDiscordMessage(
+        //     "File Processing Started",
+        //     `📁 Starting file processing\nTotal Dates: ${totalDates}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+        // );
 
         for (let chatKey in dateAccChats) {
             processedDates++;
@@ -1747,10 +1743,10 @@ const mainEngine = async (req, res) => {
 
             // Log progress
             if (processedDates % 5 === 0 || processedDates === totalDates) {
-                await sendDiscordMessage(
-                    "File Processing Progress",
-                    `📊 Processing progress: ${processedDates}/${totalDates} dates\nCurrent: ${chatKey}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
-                );
+                // await sendDiscordMessage(
+                //     "File Processing Progress",
+                //     `📊 Processing progress: ${processedDates}/${totalDates} dates\nCurrent: ${chatKey}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+                // );
             }
 
             if (!fileExists) {
@@ -1935,10 +1931,10 @@ const mainEngine = async (req, res) => {
                 );
 
                 // Log successful sync update
-                await sendDiscordMessage(
-                    "Sync Time Updated",
-                    `✅ Updated last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nSync Time: ${currentDate}\nResponse: ${syncResponse.status}`
-                );
+                // await sendDiscordMessage(
+                //     "Sync Time Updated",
+                //     `✅ Updated last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nSync Time: ${currentDate}\nResponse: ${syncResponse.status}`
+                // );
             } catch (apiError) {
                 console.error(
                     "Error updating last chat sync time:",
