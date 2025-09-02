@@ -166,13 +166,14 @@ async function connectToMongo() {
 connectToMongo();
 
 // Retry helper for template code lookup with exponential backoff
+// Delay progression: 1.5s, 4.5s, 13.5s, 40.5s (max delay: 40.5s, total: ~59.25s)
 const findTemplateCodeWithRetry = async (
     msgId,
     {
         includeSentWabaFallback = false,
-        attempts = 5,
+        attempts = 4,
         initialDelayMs = 1500,
-        factor = 4,
+        factor = 3,
     } = {}
 ) => {
     let currentDelay = initialDelayMs;
@@ -187,7 +188,7 @@ const findTemplateCodeWithRetry = async (
                     return {
                         template_code: broadcastRecord.template_id,
                         source: "broadcast_collection",
-                    };
+                    }; 
                 }
             }
 
@@ -207,6 +208,7 @@ const findTemplateCodeWithRetry = async (
                     };
                 }
             }
+            sendDiscordMessage("Template Lookup Error - Retry", `🚨 Template lookup failed for message ${msgId} after ${attempts} attempts. Error: ${err.message}`);
         } catch (err) {
             console.error(
                 `Retry attempt ${
@@ -218,6 +220,7 @@ const findTemplateCodeWithRetry = async (
 
         // If not found and more attempts remain, wait with backoff
         if (attempt < attempts - 1) {
+            await new Promise((resolve) => setTimeout(resolve, currentDelay));
             currentDelay = currentDelay * factor;
         }
     }
@@ -670,9 +673,9 @@ async function checkForSendFormat(eventData) {
                     try {
                         const result = await findTemplateCodeWithRetry(msgId, {
                             includeSentWabaFallback: false,
-                            attempts: 5,
+                            attempts: 4,
                             initialDelayMs: 1500,
-                            factor: 4,
+                            factor: 3,
                         });
 
                         if (result && result.template_code) {
@@ -891,9 +894,9 @@ async function checkForSendFormat(eventData) {
                     includeSentWabaFallback: !!(
                         sentMsg && sentMsg.type === "template"
                     ),
-                    attempts: 5,
+                    attempts: 4,
                     initialDelayMs: 1500,
-                    factor: 4,
+                    factor: 3,
                 });
 
                 if (result && result.template_code) {
@@ -1017,9 +1020,9 @@ async function checkForSendFormat(eventData) {
             // Final attempt with backoff
             const result = await findTemplateCodeWithRetry(msgId, {
                 includeSentWabaFallback: true,
-                attempts: 5,
+                attempts: 4,
                 initialDelayMs: 1500,
-                factor: 4,
+                factor: 3,
             });
 
             if (result && result.template_code) {
@@ -1298,9 +1301,9 @@ async function checkForReplyFormat(eventData) {
                 // Use retry helper without sentWaba fallback for incoming path
                 const result = await findTemplateCodeWithRetry(msgId, {
                     includeSentWabaFallback: false,
-                    attempts: 5,
+                    attempts: 4,
                     initialDelayMs: 1500,
-                    factor: 4,
+                    factor: 3,
                 });
 
                 if (result && result.template_code) {
@@ -1397,11 +1400,7 @@ async function detectingAndModifyingDataFormat(eventData) {
         return eventData;
     }
 
-    // Discord log for raw extracted data
-    await sendDiscordMessage(
-        "detectingAndModifyingDataFormat",
-        `Raw extracted eventData:\n${JSON.stringify(eventData)}`
-    );
+    
     console.log(
         "------------****************> extractedData 1start <---------------------------"
     );
@@ -1412,13 +1411,14 @@ async function detectingAndModifyingDataFormat(eventData) {
 
     let sendFormatResult = await checkForSendFormat(eventData);
     // Discord log for sendFormatResult
-    await sendDiscordMessage(
-        "detectingAndModifyingDataFormat",
-        `sendFormatResult:\n${JSON.stringify(sendFormatResult)}`
-    );
+    
     console.log(JSON.stringify(sendFormatResult));
     console.log("--> sendFormatResult");
     if (sendFormatResult) {
+        await sendDiscordMessage(
+            "detectingAndModifyingDataFormat",
+            `sendFormatResult:\n${JSON.stringify(sendFormatResult)}`
+        );
         return sendFormatResult;
     }
 
@@ -1430,11 +1430,7 @@ async function detectingAndModifyingDataFormat(eventData) {
         return replyFormatResult;
     }
 
-    // Discord log for unhandled eventData
-    await sendDiscordMessage(
-        "detectingAndModifyingDataFormat",
-        `No matching format found for eventData:\n${JSON.stringify(eventData)}`
-    );
+    
     console.log("---------------------2 START----------------------");
     console.log(JSON.stringify(eventData));
     console.log("---------------------2 END----------------------");
@@ -1469,11 +1465,11 @@ const mainEngine = async (req, res) => {
         const startTime = Date.now();
         const extractedData = extractEventData(req);
         if (!extractedData.workspace_id) {
-            sendDiscordMessage("Extracted Data", JSON.stringify(extractedData));
+            // sendDiscordMessage("Extracted Data", JSON.stringify(extractedData));
         }
         let eventData = await detectingAndModifyingDataFormat(extractedData);
         if (!eventData.workspace_id) {
-            sendDiscordMessage("Event Data", JSON.stringify(eventData));
+            // sendDiscordMessage("Event Data", JSON.stringify(eventData));
         }
 
         let pubsubMessage = await mongoPubSubMessagesCollection.findOne({
@@ -1765,10 +1761,10 @@ const mainEngine = async (req, res) => {
                     });
 
                     // Log successful file creation
-                    await sendDiscordMessage(
-                        "GCS File Creation Success",
-                        `✅ Successfully created GCS file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nDate: ${chatKey}`
-                    );
+                    // await sendDiscordMessage(
+                    //     "GCS File Creation Success",
+                    //     `✅ Successfully created GCS file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nDate: ${chatKey}`
+                    // );
                 } catch (uploadError) {
                     console.error(
                         `GCS upload error for ${filePath}:`,
@@ -1801,7 +1797,7 @@ const mainEngine = async (req, res) => {
                         // Log retry failure
                         await sendDiscordMessage(
                             "GCS Retry Failed",
-                            `💥 GCS retry upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}`
+                            `💥 GCS retry upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}\nRetry: ${retryError}`
                         );
 
                         throw retryError; // Re-throw to be caught by outer error handler
@@ -1942,10 +1938,10 @@ const mainEngine = async (req, res) => {
                 );
 
                 // Log sync update error
-                await sendDiscordMessage(
-                    "Sync Time Update Failed",
-                    `❌ Failed to update last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nError: ${apiError.message}`
-                );
+                // await sendDiscordMessage(
+                //     "Sync Time Update Failed",
+                //     `❌ Failed to update last chat sync time\nWorkspace ID: ${eventData.workspace_id}\nError: ${apiError.message}`
+                // );
             }
         }
 
