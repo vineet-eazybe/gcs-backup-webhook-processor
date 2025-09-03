@@ -99,8 +99,8 @@ async function connectToMongo() {
         } else {
             console.log("Connecting to main MongoDB...");
             await mongoClient.connect({
-                maxPoolSize: 10,
-                minPoolSize: 0,
+                maxPoolSize: 100,
+                minPoolSize: 10,
                 serverSelectionTimeoutMS: 5000,
                 socketTimeoutMS: 45000,
             });
@@ -116,7 +116,7 @@ async function connectToMongo() {
         } else {
             console.log("Connecting to broadcast MongoDB...");
             await mongoBroadcastClient.connect({
-                maxPoolSize: 50,
+                maxPoolSize: 100,
                 minPoolSize: 10,
                 serverSelectionTimeoutMS: 5000,
                 socketTimeoutMS: 45000,
