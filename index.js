@@ -116,8 +116,8 @@ async function connectToMongo() {
         } else {
             console.log("Connecting to broadcast MongoDB...");
             await mongoBroadcastClient.connect({
-                maxPoolSize: 10,
-                minPoolSize: 0,
+                maxPoolSize: 50,
+                minPoolSize: 10,
                 serverSelectionTimeoutMS: 5000,
                 socketTimeoutMS: 45000,
             });
