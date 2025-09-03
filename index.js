@@ -597,7 +597,7 @@ async function checkForSendFormat(eventData) {
             );
 
             // Use debug function to get more insights
-            await debugMessageLookup(msgId, from, to, status);
+            // await debugMessageLookup(msgId, from, to, status);
 
             // Log the webhook status data for debugging
             console.log(`Webhook status data for message ${msgId}:`, {
