@@ -45,7 +45,7 @@ const transformChatToRow = (chat, orgId, uid) => {
 
     // NULLABLE fields
     user_id: uid ? String(uid) : null,
-    sender_number: chat.SentByNumber || null,
+    sender_number: chat.SentByNumber || '123456789',
     ack: chat.Ack || null,
     message_text: messageText,
     
