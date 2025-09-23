@@ -1381,74 +1381,13 @@ async function checkForReplyFormat(eventData) {
         uid = "67890"; // Use default workspace_id for testing
     }
 
-    // Step 1: Check if whatsappMessageId exists
-    let template_code = null;
-    if (msgId) {
-        try {
-            // Log template processing start for incoming message
-            sendDiscordMessage(
-                "Template Processing Started - Incoming",
-                `🚀 Starting template lookup for incoming message\nMessage ID: ${msgId}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}\nMessage Content: ${msg}`
-            );
-
-            // Step 2: Find matching record in broadcast collection
-            if (!mongoBroadcastCollection) {
-                console.error(
-                    "Broadcast collection not initialized, skipping template lookup"
-                );
-                sendDiscordMessage(
-                    "Template Lookup Error - Incoming",
-                    `🚨 Broadcast collection not initialized for message ${msgId}`
-                );
-            } else {
-                // Use enhanced fallback helper for incoming messages
-                const result = await findTemplateCodeWithFallback(
-                    msgId, 
-                    to, // recipient phone number for fallback query (incoming: to is the sender)
-                    false // don't include sentWaba fallback for incoming path
-                );
-
-                if (result && result.template_code) {
-                    template_code = result.template_code;
-                    console.log(
-                        `Template found for incoming message ${msgId} with retry: ${template_code}`
-                    );
-                    sendDiscordMessage(
-                        "Template Found - Incoming",
-                        `✅ Template found for incoming message with retry\nMessage ID: ${msgId}\nTemplate ID: ${template_code}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}\nSource: ${result.source}`
-                    );
-                } else {
-                    sendDiscordMessage(
-                        "No Template Found After Retries - Incoming",
-                        `❌ No template found for incoming message after retries\nMessage ID: ${msgId}\nFrom: ${to}\nTo: ${from}\nMessage Type: ${msgType}`
-                    );
-                }
-            }
-        } catch (error) {
-            console.error(
-                "Error checking broadcast collection for template:",
-                error
-            );
-
-            // Log template lookup errors for incoming message
-            sendDiscordMessage(
-                "Template Lookup Error - Incoming",
-                `🚨 Error checking broadcast collection for incoming message\nMessage ID: ${msgId}\nError: ${error.message}\nStack: ${error.stack}`
-            );
-        }
-    }
+    // Incoming messages are user replies, not template messages
+    // No template processing needed for incoming messages
 
     // Log final message processing result for incoming message
-    const finalIncomingMessage = template_code
-        ? `%%%template%%% ${template_code}`
-        : msg;
     sendDiscordMessage(
         "Message Processing Complete - Incoming",
-        `📝 Incoming message processing complete\nMessage ID: ${msgId}\nTemplate Applied: ${
-            template_code ? "Yes" : "No"
-        }\nTemplate Code: ${
-            template_code || "None"
-        }\nFinal Message: ${finalIncomingMessage}\nOriginal Message: ${msg}\nMessage Type: ${msgType}\nFrom: ${to}\nTo: ${from}`
+        `📝 Incoming message processing complete\nMessage ID: ${msgId}\nMessage: ${msg}\nMessage Type: ${msgType}\nFrom: ${to}\nTo: ${from}`
     );
 
     let formattedObj = {
@@ -1465,9 +1404,7 @@ async function checkForReplyFormat(eventData) {
                     isBroadcast: false,
                     broadcastData: null,
                     MessageId: msgId,
-                    Message: template_code
-                        ? `%%%template%%% ${template_code}`
-                        : msg,
+                    Message: msg,
                     Chatid: `${to}@c.us`,
                     Type: msgType,
                     File: null,
@@ -1813,10 +1750,10 @@ const mainEngine = async (req, res) => {
             console.log(`✅ BigQuery processing completed: ${bigQueryResult}`);
             
             // Log successful BigQuery processing
-            await sendDiscordMessage(
-                "BigQuery Processing Success",
-                `✅ Successfully processed data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nResult: ${bigQueryResult}`
-            );
+            // await sendDiscordMessage(
+            //     "BigQuery Processing Success",
+            //     `✅ Successfully processed data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nResult: ${bigQueryResult}`
+            // );
         } catch (bigQueryError) {
             console.error("Error processing data for BigQuery:", bigQueryError);
             await sendDiscordMessage(
@@ -2179,13 +2116,13 @@ const webhookProcessor = async (req, res) => {
 
 
 
-app.post("/", async (req, res) => {
-    return (await webhookProcessor(req, res))
-});
+// app.post("/", async (req, res) => {
+//     return (await webhookProcessor(req, res))
+// });
 
-app.listen(3003, () => {
-    console.log("Server is listening on PORT =>", 3003);
-});
+// app.listen(3003, () => {
+//     console.log("Server is listening on PORT =>", 3003);
+// });
 
 // Export for external use
 exports.webhookProcessor = webhookProcessor;
