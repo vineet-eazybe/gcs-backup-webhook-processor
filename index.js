@@ -4,9 +4,6 @@ const { MongoClient } = require("mongodb"); // Using JS Date, Timestamp not stri
 const axios = require("axios");
 const { bigQueryProcessor } = require("./bigQueryProcessor");
 
-// Set Google Cloud credentials environment variable
-process.env.GOOGLE_APPLICATION_CREDENTIALS = "./gcp-key.json";
-
 const app = express();
 
 // Use JSON middleware to parse request bodies with increased size limit
@@ -74,8 +71,6 @@ if (
 // --- Initialize Clients ---
 
 const storage = new Storage({
-    projectId: "waba-454907",
-    keyFilename: "gcp-key.json",
     retryOptions: {
         autoRetry: true,
         maxRetries: 5,
@@ -169,6 +164,60 @@ async function connectToMongo() {
 }
 connectToMongo();
 
+// Two-step fallback query for broadcast records with webhook race condition handling
+const findBroadcastRecordWithFallback = async (whatsappMessageId, recipientPhoneNumber) => {
+    try {
+        // Step 1: Primary query - try to find by whatsapp_message_id
+        let record = await mongoBroadcastCollection.findOne({
+            whatsapp_message_id: whatsappMessageId
+        });
+
+        if (record) {
+            console.log(`✅ Found broadcast record by message ID: ${whatsappMessageId}`);
+            return record;
+        }
+
+        // Step 2: Fallback query - find by recipient phone number and pending status
+        console.log(`⚠️ Message ID not found, trying fallback query for phone: ${recipientPhoneNumber}`);
+        record = await mongoBroadcastCollection.findOne({
+            recipient_phone_number: recipientPhoneNumber,
+            processing_status: "PENDING_SEND"
+        }, {
+            sort: { created_at: -1 } // Get the most recent one
+        });
+
+        if (record) {
+            console.log(`✅ Found broadcast record by fallback query, updating with message ID: ${whatsappMessageId}`);
+            
+            // Update the record with the actual message ID
+            await mongoBroadcastCollection.updateOne(
+                { _id: record._id },
+                { 
+                    $set: { 
+                        whatsapp_message_id: whatsappMessageId,
+                        processing_status: "PENDING_WEBHOOK",
+                        updated_at: new Date()
+                    }
+                }
+            );
+
+            // Return the updated record
+            return {
+                ...record,
+                whatsapp_message_id: whatsappMessageId,
+                processing_status: "PENDING_WEBHOOK"
+            };
+        }
+
+        console.log(`❌ No broadcast record found for message ID: ${whatsappMessageId} or phone: ${recipientPhoneNumber}`);
+        return null;
+
+    } catch (error) {
+        console.error(`Error finding broadcast record for webhook:`, error);
+        return null;
+    }
+};
+
 // Retry helper for template code lookup with exponential backoff
 // Delay progression: 1.5s, 4.5s, 13.5s, 40.5s (max delay: 40.5s, total: ~59.25s)
 const findTemplateCodeWithRetry = async (
@@ -183,8 +232,10 @@ const findTemplateCodeWithRetry = async (
     let currentDelay = initialDelayMs;
     for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-            // Try broadcast collection first
+            // Try broadcast collection first with fallback logic
             if (mongoBroadcastCollection) {
+                // For template lookup, we need to extract recipient phone number from context
+                // This will be passed from the calling function
                 const broadcastRecord = await mongoBroadcastCollection.findOne({
                     whatsapp_message_id: msgId,
                 });
@@ -229,6 +280,43 @@ const findTemplateCodeWithRetry = async (
         }
     }
     return null;
+};
+
+// Enhanced template lookup with fallback logic for webhook processing
+const findTemplateCodeWithFallback = async (msgId, recipientPhoneNumber, includeSentWabaFallback = false) => {
+    try {
+        // First try the fallback broadcast record lookup
+        const broadcastRecord = await findBroadcastRecordWithFallback(msgId, recipientPhoneNumber);
+        
+        if (broadcastRecord && broadcastRecord.template_id) {
+            console.log(`✅ Template found via fallback broadcast lookup: ${broadcastRecord.template_id}`);
+            return {
+                template_code: broadcastRecord.template_id,
+                source: "broadcast_collection_fallback",
+                broadcast_record: broadcastRecord
+            };
+        }
+
+        // If no broadcast record found, try the original retry logic
+        const retryResult = await findTemplateCodeWithRetry(msgId, {
+            includeSentWabaFallback: includeSentWabaFallback,
+            attempts: 4,
+            initialDelayMs: 1500,
+            factor: 3,
+        });
+
+        if (retryResult && retryResult.template_code) {
+            console.log(`✅ Template found via retry logic: ${retryResult.template_code}`);
+            return retryResult;
+        }
+
+        console.log(`❌ No template found for message ID: ${msgId}`);
+        return null;
+
+    } catch (error) {
+        console.error(`Error in findTemplateCodeWithFallback:`, error);
+        return null;
+    }
 };
 
 // Debug function to help track message lookup issues
@@ -527,10 +615,8 @@ async function checkForSendFormat(eventData) {
                 !sentMsg.last_message.startsWith("%%%template%%%"))
         ) {
             try {
-                // Try to find template code from broadcast collection
-                const broadcastRecord = await mongoBroadcastCollection.findOne({
-                    whatsapp_message_id: msgId,
-                });
+                // Try to find template code from broadcast collection using fallback logic
+                const broadcastRecord = await findBroadcastRecordWithFallback(msgId, to);
 
                 if (broadcastRecord && broadcastRecord.template_id) {
                     const updateResult = await mongoSentMsgCollection.updateOne(
@@ -675,12 +761,11 @@ async function checkForSendFormat(eventData) {
                 // Check if this is a template message based on conversation origin
                 if (status.conversation?.origin?.type === "marketing") {
                     try {
-                        const result = await findTemplateCodeWithRetry(msgId, {
-                            includeSentWabaFallback: false,
-                            attempts: 4,
-                            initialDelayMs: 1500,
-                            factor: 3,
-                        });
+                        const result = await findTemplateCodeWithFallback(
+                            msgId, 
+                            to, // recipient phone number for fallback query
+                            false // don't include sentWaba fallback
+                        );
 
                         if (result && result.template_code) {
                             webhookMessage = `%%%template%%% ${result.template_code}`;
@@ -901,15 +986,12 @@ async function checkForSendFormat(eventData) {
                     `🚨 Broadcast collection not initialized for message ${msgId}`
                 );
             } else {
-                // Use retry helper with fallback to sentWabaMesg for template messages
-                const result = await findTemplateCodeWithRetry(msgId, {
-                    includeSentWabaFallback: !!(
-                        sentMsg && sentMsg.type === "template"
-                    ),
-                    attempts: 4,
-                    initialDelayMs: 1500,
-                    factor: 3,
-                });
+                // Use enhanced fallback helper with broadcast record fallback logic
+                const result = await findTemplateCodeWithFallback(
+                    msgId, 
+                    to, // recipient phone number for fallback query
+                    !!(sentMsg && sentMsg.type === "template")
+                );
 
                 if (result && result.template_code) {
                     template_code = result.template_code;
@@ -1029,13 +1111,12 @@ async function checkForSendFormat(eventData) {
         );
 
         try {
-            // Final attempt with backoff
-            const result = await findTemplateCodeWithRetry(msgId, {
-                includeSentWabaFallback: true,
-                attempts: 4,
-                initialDelayMs: 1500,
-                factor: 3,
-            });
+            // Final attempt with enhanced fallback logic
+            const result = await findTemplateCodeWithFallback(
+                msgId, 
+                to, // recipient phone number for fallback query
+                true // include sentWaba fallback
+            );
 
             if (result && result.template_code) {
                 template_code = result.template_code;
@@ -1320,13 +1401,12 @@ async function checkForReplyFormat(eventData) {
                     `🚨 Broadcast collection not initialized for message ${msgId}`
                 );
             } else {
-                // Use retry helper without sentWaba fallback for incoming path
-                const result = await findTemplateCodeWithRetry(msgId, {
-                    includeSentWabaFallback: false,
-                    attempts: 4,
-                    initialDelayMs: 1500,
-                    factor: 3,
-                });
+                // Use enhanced fallback helper for incoming messages
+                const result = await findTemplateCodeWithFallback(
+                    msgId, 
+                    to, // recipient phone number for fallback query (incoming: to is the sender)
+                    false // don't include sentWaba fallback for incoming path
+                );
 
                 if (result && result.template_code) {
                     template_code = result.template_code;
