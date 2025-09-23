@@ -17,20 +17,34 @@ const tableId = "message_events";       // your table
 const transformChatToRow = (chat, orgId, uid) => {
   const messageText = chat.Message || null;
 
-  const eventId = `${orgId}-${uuidv4()}`;
+  // Ensure orgId is a string
+  const orgIdStr = String(orgId);
+  const eventId = `${orgIdStr}-${uuidv4()}`;
+  
+  // Validate required fields
+  if (!chat.MessageId) {
+    console.warn("⚠️ Missing MessageId in chat:", chat);
+  }
+  if (!chat.Chatid) {
+    console.warn("⚠️ Missing Chatid in chat:", chat);
+  }
+  if (!chat.Datetime) {
+    console.warn("⚠️ Missing Datetime in chat:", chat);
+  }
+  
   return {
     // REQUIRED fields
     event_id: eventId, // Generate a unique ID for each event
-    message_id: chat.MessageId,
-    chat_id: chat.Chatid,
-    org_id: orgId, // Pass org_id from the function's context
-    message_timestamp: new Date(chat.Datetime).toISOString(),
+    message_id: chat.MessageId || `missing_${Date.now()}`,
+    chat_id: chat.Chatid || `missing_${Date.now()}`,
+    org_id: orgIdStr, // Ensure org_id is a string
+    message_timestamp: chat.Datetime ? new Date(chat.Datetime).toISOString() : new Date().toISOString(),
     ingestion_timestamp: new Date().toISOString(),
-    direction: chat.Direction,
-    type: chat.Type,
+    direction: chat.Direction || 'UNKNOWN',
+    type: chat.Type || 'unknown',
 
     // NULLABLE fields
-    user_id: uid || null,
+    user_id: uid ? String(uid) : null,
     sender_number: chat.SentByNumber || null,
     ack: chat.Ack || null,
     message_text: messageText,
@@ -39,7 +53,7 @@ const transformChatToRow = (chat, orgId, uid) => {
     file_url: chat.File || null,
 
     // Broadcast fields
-    is_broadcast: chat.isBroadcast || null,
+    is_broadcast: chat.isBroadcast || false,
     
     // Other nested data and calculated fields
     special_data: chat.SpecialData ? JSON.stringify(chat.SpecialData) : null,
@@ -71,14 +85,31 @@ exports.bigQueryProcessor = async (dateAccChats, orgId, uid) => {
     console.log("🔄 Transformed rows for BigQuery:", rows.length);
 
     console.log("📝 Inserting rows into BigQuery...");
-    await bigquery.dataset(datasetId).table(tableId).insert(rows);
-    console.log(`✅ Successfully inserted ${rows.length} rows into BigQuery`);
+    console.log("🔍 Sample row data:", JSON.stringify(rows[0], null, 2));
     
+    const [insertResult] = await bigquery.dataset(datasetId).table(tableId).insert(rows);
+    
+    // Check for partial failures
+    if (insertResult && insertResult.length > 0) {
+      console.error("❌ BigQuery partial failure detected:");
+      insertResult.forEach((error, index) => {
+        console.error(`❌ Row ${index} error:`, JSON.stringify(error, null, 2));
+      });
+      throw new Error(`BigQuery partial failure: ${insertResult.length} rows failed`);
+    }
+    
+    console.log(`✅ Successfully inserted ${rows.length} rows into BigQuery`);
     return "Success";
   } catch (error) {
     console.error("❌ BigQuery insert error:", JSON.stringify(error, null, 2));
     console.error("❌ Error details:", error.message);
     console.error("❌ Error stack:", error.stack);
+    
+    // Log sample data for debugging
+    if (rows && rows.length > 0) {
+      console.error("🔍 Sample row that failed:", JSON.stringify(rows[0], null, 2));
+    }
+    
     throw error; // Re-throw to be caught by the main error handler
   }
 };
