@@ -2,6 +2,10 @@ const express = require("express");
 const { Storage } = require("@google-cloud/storage");
 const { MongoClient } = require("mongodb"); // Using JS Date, Timestamp not strictly needed here
 const axios = require("axios");
+const { bigQueryProcessor } = require("./bigQueryProcessor");
+
+// Set Google Cloud credentials environment variable
+process.env.GOOGLE_APPLICATION_CREDENTIALS = "./gcp-key.json";
 
 const app = express();
 
@@ -70,8 +74,8 @@ if (
 // --- Initialize Clients ---
 
 const storage = new Storage({
-    // projectId: "waba-454907",
-    // keyFilename: "my-key.json",
+    projectId: "waba-454907",
+    keyFilename: "gcp-key.json",
     retryOptions: {
         autoRetry: true,
         maxRetries: 5,
@@ -811,7 +815,7 @@ async function checkForSendFormat(eventData) {
     if (statusValue !== "delivered" && statusValue !== "sent") {
         return null;
     }
-
+    let uid = null;
     let org_id = null;
     try {
         const response = await axios.post(
@@ -828,7 +832,7 @@ async function checkForSendFormat(eventData) {
         if (response.data?.error) {
             return null;
         }
-
+        uid = response.data?.data?.workapace_id;
         org_id = response.data?.data?.org_id;
     } catch (err) {
         console.log(
@@ -840,7 +844,15 @@ async function checkForSendFormat(eventData) {
         );
     }
 
-    if (!org_id) return 0;
+    if (!org_id) {
+        console.log("⚠️ No org_id found, using default for testing");
+        org_id = "12345"; // Use default org_id for testing
+    }
+    
+    if (!uid) {
+        console.log("⚠️ No uid found, using default for testing");
+        uid = "67890"; // Use default workspace_id for testing
+    }
 
     let isBroadcast = false;
     // Set isBroadcast to true for template messages
@@ -1127,6 +1139,7 @@ async function checkForSendFormat(eventData) {
     });
 
     let formattedObj = {
+        uid: uid,
         orgId: org_id,
         phoneNumber: from,
         nameMapping: {
@@ -1249,6 +1262,7 @@ async function checkForReplyFormat(eventData) {
     }
 
     let org_id = null;
+    let uid = null;
     try {
         const response = await axios.post(
             "https://dev.eazybe.com/v2/waba/get-embedded-signup-by-phone-number",
@@ -1264,7 +1278,7 @@ async function checkForReplyFormat(eventData) {
         if (response.data?.error) {
             return null;
         }
-
+        uid = response.data?.data?.workapace_id;
         org_id = response.data?.data?.org_id;
     } catch (err) {
         console.log(
@@ -1276,7 +1290,15 @@ async function checkForReplyFormat(eventData) {
         );
     }
 
-    if (!org_id) return 0;
+    if (!org_id) {
+        console.log("⚠️ No org_id found, using default for testing");
+        org_id = "12345"; // Use default org_id for testing
+    }
+
+    if (!uid) {
+        console.log("⚠️ No workspace_id found, using default for testing");
+        uid = "67890"; // Use default workspace_id for testing
+    }
 
     // Step 1: Check if whatsappMessageId exists
     let template_code = null;
@@ -1351,6 +1373,7 @@ async function checkForReplyFormat(eventData) {
 
     let formattedObj = {
         orgId: org_id,
+        uid: uid,
         phoneNumber: from,
         nameMapping: {
             [`${to}@c.us`]: toName,
@@ -1389,6 +1412,8 @@ async function checkForReplyFormat(eventData) {
 }
 
 async function detectingAndModifyingDataFormat(eventData) {
+    console.log("🔍 detectingAndModifyingDataFormat called with:", JSON.stringify(eventData, null, 2));
+    
     if (
         // eventData?.mode && eventData?.mode === "EXT" &&
         eventData?.orgId &&
@@ -1397,8 +1422,11 @@ async function detectingAndModifyingDataFormat(eventData) {
         eventData?.chatters
         // eventData?.groupParticipants
     ) {
+        console.log("✅ Data format is already correct, returning as-is");
         return eventData;
     }
+    
+    console.log("🔄 Data format needs processing, checking for send/reply formats...");
 
     
     console.log(
@@ -1462,19 +1490,28 @@ async function updatePubSubMessageStatus(
 
 const mainEngine = async (req, res) => {
     try {
+        console.log("🚀 mainEngine started");
         const startTime = Date.now();
         const extractedData = extractEventData(req);
+        console.log("📥 Extracted data:", JSON.stringify(extractedData, null, 2));
+        
         if (!extractedData.workspace_id) {
             // sendDiscordMessage("Extracted Data", JSON.stringify(extractedData));
         }
         let eventData = await detectingAndModifyingDataFormat(extractedData);
+        console.log("🔄 Event data after format detection:", JSON.stringify(eventData, null, 2));
+        
         if (!eventData.workspace_id) {
             // sendDiscordMessage("Event Data", JSON.stringify(eventData));
         }
 
+        console.log("🔍 Checking for existing PubSub message...");
+        const messageId = req?.body?.message?.messageId || "direct_request_" + Date.now();
+        console.log("📋 Message ID:", messageId);
         let pubsubMessage = await mongoPubSubMessagesCollection.findOne({
-            messageId: req?.body?.message?.messageId,
+            messageId: messageId,
         });
+        console.log("📋 PubSub message check result:", pubsubMessage);
         if (pubsubMessage) {
             if (pubsubMessage.status === "processing") {
                 updatePubSubMessageStatus(
@@ -1502,8 +1539,9 @@ const mainEngine = async (req, res) => {
             }
         }
 
+        console.log("📝 Inserting new PubSub message record...");
         await mongoPubSubMessagesCollection.insertOne({
-            messageId: req?.body?.message?.messageId,
+            messageId: messageId,
             phoneNumber: eventData?.phoneNumber || null,
             publishTime: req?.body?.message?.publishTime,
             status: "processing",
@@ -1511,8 +1549,10 @@ const mainEngine = async (req, res) => {
             timeTaken: null,
             createdAt: new Date(),
         });
+        console.log("✅ PubSub message record inserted successfully");
 
         if (!eventData || typeof eventData !== "object") {
+            console.log("❌ Event data is not a valid object:", eventData);
             //   sendDiscordMessage(
             //     'Event Data Type Error',
             //     `Extracted event data is not a valid object: ${JSON.stringify(
@@ -1523,22 +1563,30 @@ const mainEngine = async (req, res) => {
         }
 
         if (!eventData?.orgId) {
+            console.log("❌ Missing orgId");
             return false;
         }
         if (!eventData?.phoneNumber) {
+            console.log("❌ Missing phoneNumber");
             return false;
         }
         if (!eventData?.nameMapping) {
+            console.log("❌ Missing nameMapping");
             return false;
         }
         if (!eventData?.chatters) {
+            console.log("❌ Missing chatters");
             return false;
         }
         if (!eventData?.groupParticipants) {
+            console.log("❌ Missing groupParticipants");
             return false;
         }
 
+        console.log("✅ All required fields present, proceeding with processing...");
+
         // Validate backup prerequisites
+        console.log("🔍 Validating backup prerequisites...");
         if (
             !eventData.orgId ||
             !eventData.phoneNumber ||
@@ -1605,18 +1653,6 @@ const mainEngine = async (req, res) => {
                     console.log(
                         `Phone ${eventData.phoneNumber} is not connected to WABA, proceeding with backup process`
                     );
-
-                    // Send Discord notification about proceeding with backup
-                    // sendDiscordMessage(
-                    //     "WABA Backup Proceeding",
-                    //     `📋 Proceeding with backup process for workspace ${
-                    //         eventData.workspace_id
-                    //     }\nPhone: ${
-                    //         eventData.phoneNumber
-                    //     }\nReason: Phone not connected to WABA\nStatus: ${
-                    //         wabaResponse.data?.data?.message || "Unknown"
-                    //     }`
-                    // );
                 }
             } catch (error) {
                 console.error(
@@ -1635,16 +1671,17 @@ const mainEngine = async (req, res) => {
         // If no workspace_id, proceed with normal backup process
         if (!eventData.workspace_id) {
             sendDiscordMessage(
-                "Normal Backup Proceeding",
+                "WABA Backup Proceeding",
                 `📋 Proceeding with normal backup process (no workspace_id)\nPhone: ${eventData.phoneNumber}\nOrg ID: ${eventData.orgId}`
             );
         }
 
+        console.log("📊 Creating dateAccChats object...");
         let dateAccChats = {};
         let toPhoneNumberArray = Object.keys(eventData.chatters).map(
             (chatter) => chatter.split("@")[0]
         );
-        console.log("Total chatter =>", toPhoneNumberArray.length);
+        console.log("📱 Total chatters =>", toPhoneNumberArray.length);
 
 
         let startTimeLastMsgOne = Date.now();
@@ -1689,6 +1726,26 @@ const mainEngine = async (req, res) => {
             }
         }
 
+        // Process data for BigQuery after dateAccChats is created
+        try {
+            console.log("🚀 Starting BigQuery processing...");
+            const bigQueryResult = await bigQueryProcessor(dateAccChats, eventData.orgId, eventData.uid ?? eventData.workspace_id ?? null);
+            console.log(`✅ BigQuery processing completed: ${bigQueryResult}`);
+            
+            // Log successful BigQuery processing
+            await sendDiscordMessage(
+                "BigQuery Processing Success",
+                `✅ Successfully processed data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nResult: ${bigQueryResult}`
+            );
+        } catch (bigQueryError) {
+            console.error("Error processing data for BigQuery:", bigQueryError);
+            await sendDiscordMessage(
+                "BigQuery Processing Error",
+                `❌ Failed to process data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${bigQueryError.message}\nStack: ${bigQueryError.stack}`
+            );
+            // Don't throw error - continue with file processing even if BigQuery fails
+        }
+
         let startTimeLastMsg = Date.now();
         try {
             await createLastMessages(
@@ -1715,7 +1772,6 @@ const mainEngine = async (req, res) => {
                 "Backup Creation Error",
                 `❌ Failed to create/update last messages\nOrg ID: ${eventData?.orgId}\nPhone: ${eventData?.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
             );
-            throw error; // Re-throw to be caught by outer error handler
         }
        
 
@@ -1992,9 +2048,10 @@ const mainEngine = async (req, res) => {
 };
 
 let count = 0;
-exports.webhookProcessor = async (req, res) => {
+const webhookProcessor = async (req, res) => {
     // const webhookProcessor = async (req, res) => {
     try {
+        console.log("🎯 webhookProcessor called with request body:", JSON.stringify(req.body, null, 2));
         const startTime = Date.now();
         mainEngine(req, res)
             .then((status) => {
@@ -2026,7 +2083,12 @@ exports.webhookProcessor = async (req, res) => {
                 );
             });
         // sendDiscordMessage('Total calls', ++count);
-        return res.status(200).send("Event Captured");
+        return res.status(200).json({
+            status: "success",
+            message: "Event Captured",
+            messageId: req?.body?.message?.messageId || "direct_request",
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         // sendDiscordMessage('Error', `Error processing webhook (outer): ${error}`);
         count++;
@@ -2034,10 +2096,16 @@ exports.webhookProcessor = async (req, res) => {
     }
 };
 
-// app.post("/", async (req, res) => {
-//     return (await webhookProcessor(req, res))
-// });
 
-// app.listen(3003, () => {
-//     console.log("Server is listening on PORT =>", 3003);
-// });
+
+
+app.post("/", async (req, res) => {
+    return (await webhookProcessor(req, res))
+});
+
+app.listen(3003, () => {
+    console.log("Server is listening on PORT =>", 3003);
+});
+
+// Export for external use
+exports.webhookProcessor = webhookProcessor;
