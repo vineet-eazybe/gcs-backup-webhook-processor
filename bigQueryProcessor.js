@@ -1,9 +1,6 @@
 const { BigQuery } = require("@google-cloud/bigquery");
 const { v4: uuidv4 } = require('uuid');
-const bigquery = new BigQuery({
-    keyFilename: "./gcp-key.json",
-    projectId: "waba-454907",
-});
+const bigquery = new BigQuery();
 const datasetId = "whatsapp_analytics"; // your dataset
 const tableId = "message_events";       // your table
 
@@ -14,7 +11,7 @@ const tableId = "message_events";       // your table
  * @param {string} orgId - The organization ID for this batch.
  * @returns {object} The formatted row object for BigQuery.
  */
-const transformChatToRow = (chat, orgId, uid) => {
+const transformChatToRow = (chat, orgId, uid, chatAgentMap = null) => {
   const messageText = chat.Message || null;
 
   // Ensure orgId is a string
@@ -32,20 +29,48 @@ const transformChatToRow = (chat, orgId, uid) => {
     console.warn("⚠️ Missing Datetime in chat:", chat);
   }
   
+  // Calculate agent_phone_number based on message direction
+  let agentPhoneNumber = null;
+  const chatId = chat.Chatid || `missing_${Date.now()}`;
+  const direction = chat.Direction || 'UNKNOWN';
+  const senderNumber = chat.SentByNumber || '123456789';
+  
+  // Extract recipient number from chatId (format: "phone@c.us")
+  const recipientNumber = chatId ? chatId.split('@')[0] : null;
+  
+  if (direction === 'OUTGOING') {
+    // For outgoing messages, the sender is the agent
+    agentPhoneNumber = senderNumber;
+    console.log(`📤 Outgoing message: Agent (sender) = ${agentPhoneNumber}`);
+  } else if (direction === 'INCOMING') {
+    // For incoming messages, the recipient is the agent
+    // The recipient is the person receiving the message (the agent)
+    agentPhoneNumber = recipientNumber;
+    console.log(`📥 Incoming message: Agent (recipient) = ${agentPhoneNumber}`);
+    
+    if (!agentPhoneNumber) {
+      console.warn(`⚠️ Could not determine agent phone number for incoming message in chat ${chatId}`);
+      agentPhoneNumber = "12345"; // Default fallback
+    }
+  } else {
+    console.warn(`⚠️ Unknown message direction: ${direction}`);
+    agentPhoneNumber = senderNumber; // Default to sender
+  }
+  
   return {
     // REQUIRED fields
     event_id: eventId, // Generate a unique ID for each event
     message_id: chat.MessageId || `missing_${Date.now()}`,
-    chat_id: chat.Chatid || `missing_${Date.now()}`,
+    chat_id: chatId,
     org_id: orgIdStr, // Ensure org_id is a string
     message_timestamp: chat.Datetime ? new Date(chat.Datetime).toISOString() : new Date().toISOString(),
     ingestion_timestamp: new Date().toISOString(),
-    direction: chat.Direction || 'UNKNOWN',
+    direction: direction,
     type: chat.Type || 'unknown',
 
     // NULLABLE fields
     user_id: uid ? String(uid) : null,
-    sender_number: chat.SentByNumber || '123456789',
+    sender_number: senderNumber,
     ack: chat.Ack || null,
     message_text: messageText,
     
@@ -58,6 +83,9 @@ const transformChatToRow = (chat, orgId, uid) => {
     // Other nested data and calculated fields
     special_data: chat.SpecialData ? JSON.stringify(chat.SpecialData) : null,
     word_count: messageText ? messageText.trim().split(/\s+/).length : null,
+    
+    // NEW FIELD: Agent phone number
+    agent_phone_number: agentPhoneNumber || "12345",
   };
 };
 
@@ -67,6 +95,8 @@ const transformChatToRow = (chat, orgId, uid) => {
  * @param {string} orgId - The organization ID to associate with these records.
  */
 exports.bigQueryProcessor = async (dateAccChats, orgId, uid) => {
+  let rows = null; // Declare rows outside try block for error handling
+  
   try {
     console.log("🔍 BigQuery processor starting...");
     console.log("📊 DateAccChats keys:", Object.keys(dateAccChats));
@@ -81,7 +111,8 @@ exports.bigQueryProcessor = async (dateAccChats, orgId, uid) => {
     }
 
     // Transform the array of chats into an array of BigQuery rows
-    const rows = allChats.map(chat => transformChatToRow(chat, orgId, uid));
+    // Note: chatAgentMap is not currently implemented, so we pass null
+    rows = allChats.map(chat => transformChatToRow(chat, orgId, uid, null));
     console.log("🔄 Transformed rows for BigQuery:", rows.length);
 
     console.log("📝 Inserting rows into BigQuery...");

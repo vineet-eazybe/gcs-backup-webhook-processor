@@ -71,8 +71,6 @@ if (
 // --- Initialize Clients ---
 
 const storage = new Storage({
-    keyFilename: "./gcp-key.json",
-    projectId: "waba-454907",
     retryOptions: {
         autoRetry: true,
         maxRetries: 5,
@@ -1701,7 +1699,6 @@ const mainEngine = async (req, res) => {
             (chatter) => chatter.split("@")[0]
         );
         console.log("📱 Total chatters =>", toPhoneNumberArray.length);
-        console.log("📱 Chatters data:", JSON.stringify(eventData.chatters, null, 2));
 
 
         let startTimeLastMsgOne = Date.now();
@@ -1728,18 +1725,11 @@ const mainEngine = async (req, res) => {
             let getLastMessageTime =
                 lastMessageOfChattersMap[chatter.split("@")[0]];
 
-            console.log(`🔍 Processing chatter: ${chatter}, last message time: ${getLastMessageTime}`);
-
             for (let chat of eventData.chatters[chatter]) {
                 let chatDate = chat.Date;
-                console.log(`📝 Processing message ${chat.MessageId} (${chat.Message}) - Date: ${chatDate}, Datetime: ${chat.Datetime}, LastMessageTime: ${getLastMessageTime}`);
-                
                 if (getLastMessageTime && chat.Datetime <= getLastMessageTime) {
-                    console.log(`⚠️ SKIPPING message ${chat.MessageId} - already processed (${chat.Datetime} <= ${getLastMessageTime})`);
                     continue;
                 }
-
-                console.log(`✅ INCLUDING message ${chat.MessageId} for backup`);
 
                 if (!dateAccChats.hasOwnProperty(chatDate)) {
                     dateAccChats[chatDate] = { [chatter]: [chat] };
@@ -1753,9 +1743,6 @@ const mainEngine = async (req, res) => {
             }
         }
 
-        console.log("📊 Final dateAccChats object:", JSON.stringify(dateAccChats, null, 2));
-        console.log("📊 Total dates to process:", Object.keys(dateAccChats).length);
-
         // Process data for BigQuery after dateAccChats is created
         try {
             console.log("🚀 Starting BigQuery processing...");
@@ -1763,7 +1750,7 @@ const mainEngine = async (req, res) => {
             console.log(`✅ BigQuery processing completed: ${bigQueryResult}`);
             
             // Log successful BigQuery processing
-            // await sendDiscordMessage(
+            // sendDiscordMessage(
             //     "BigQuery Processing Success",
             //     `✅ Successfully processed data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nResult: ${bigQueryResult}`
             // );
@@ -1820,13 +1807,8 @@ const mainEngine = async (req, res) => {
                 chatKey.split("-")[1]
             }/${chatKey.split("-")[2]}/${eventData.phoneNumber}.json`;
 
-            console.log(`📁 Processing date: ${chatKey}, File path: ${filePath}`);
-            console.log(`📁 Messages for this date:`, JSON.stringify(dateAccChats[chatKey], null, 2));
-
             const file = await bucket.file(filePath);
             let [fileExists] = await file.exists();
-            
-            console.log(`📁 File exists: ${fileExists}`);
 
             // Log progress
             if (processedDates % 5 === 0 || processedDates === totalDates) {
@@ -1845,15 +1827,11 @@ const mainEngine = async (req, res) => {
                     groupParticipants: eventData?.groupParticipants,
                 };
 
-                console.log(`📁 Creating new file with data:`, JSON.stringify(fileData, null, 2));
-
                 try {
                     await file.save(JSON.stringify(fileData, null, 2), {
                         contentType: "application/json",
                         resumable: false,
                     });
-                    
-                    console.log(`✅ Successfully created new file: ${filePath}`);
 
                     // Log successful file creation
                     // await sendDiscordMessage(
@@ -1873,6 +1851,7 @@ const mainEngine = async (req, res) => {
                     );
 
                     try {
+                        await new Promise((resolve) => setTimeout(resolve, 5000));
                         await file.save(JSON.stringify(fileData, null, 2), {
                             contentType: "application/json",
                             resumable: true,
@@ -1947,8 +1926,6 @@ const mainEngine = async (req, res) => {
                         contentType: "application/json",
                         resumable: false,
                     });
-                    
-                    console.log(`✅ Successfully updated existing file: ${filePath}`);
 
                     
                 } catch (uploadError) {
@@ -1964,6 +1941,8 @@ const mainEngine = async (req, res) => {
                     );
 
                     try {
+                        await new Promise((resolve) => setTimeout(resolve, 5000));
+
                         await file.save(
                             JSON.stringify(existingContent, null, 2),
                             {
@@ -2140,13 +2119,13 @@ const webhookProcessor = async (req, res) => {
 
 
 
-app.post("/", async (req, res) => {
-    return (await webhookProcessor(req, res))
-});
+// app.post("/", async (req, res) => {
+//     return (await webhookProcessor(req, res))
+// });
 
-app.listen(3003, () => {
-    console.log("Server is listening on PORT =>", 3003);
-});
+// app.listen(3003, () => {
+//     console.log("Server is listening on PORT =>", 3003);
+// });
 
 // Export for external use
 exports.webhookProcessor = webhookProcessor;
