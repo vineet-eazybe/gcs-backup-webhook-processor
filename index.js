@@ -931,12 +931,12 @@ async function checkForSendFormat(eventData) {
 
     if (!org_id) {
         console.log("⚠️ No org_id found, using default for testing");
-        org_id = "12345"; // Use default org_id for testing
+        org_id = "missing_org_id"; // Use default org_id for testing
     }
     
     if (!uid) {
         console.log("⚠️ No uid found, using default for testing");
-        uid = "67890"; // Use default workspace_id for testing
+        uid = "missing_uid"; // Use default workspace_id for testing
     }
 
     let isBroadcast = false;
