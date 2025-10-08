@@ -69,11 +69,11 @@ const transformChatToRow = (chat, orgId, uid, chatAgentMap = null) => {
   let agentPhoneNumber = null;
   const chatId = chat.Chatid || `missing_${Date.now()}`;
   const direction = chat.Direction || 'UNKNOWN';
-  const senderNumber = chat.SentByNumber || '123456789';
-  
+  const senderNumber = chat.SentByNumber || 'missing_sent_by_number';
+
   // Extract recipient number from chatId (format: "phone@c.us")
   const recipientNumber = chatId ? chatId.split('@')[0] : null;
-  
+  const createdByUser = chat.CreatedByUser || 'missing_created_by_user';
   if (direction === 'OUTGOING') {
     // For outgoing messages, the sender is the agent
     agentPhoneNumber = senderNumber;
@@ -81,7 +81,7 @@ const transformChatToRow = (chat, orgId, uid, chatAgentMap = null) => {
   } else if (direction === 'INCOMING') {
     // For incoming messages, the recipient is the agent
     // The recipient is the person receiving the message (the agent)
-    agentPhoneNumber = recipientNumber;
+    agentPhoneNumber = createdByUser;
     console.log(`📥 Incoming message: Agent (recipient) = ${agentPhoneNumber}`);
     
     if (!agentPhoneNumber) {
