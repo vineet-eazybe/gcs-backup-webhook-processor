@@ -15,7 +15,7 @@ const url = [
     "https://discord.com/api/webhooks/1411987552767836220/krPXdVwpFGhoIWrjaOa6P_CnehvNqDnmYMe3kEwEQcn10eLvBAE-ECn9qtrNVB1ImWBK",
     "https://discord.com/api/webhooks/1411987758511296593/Q1E2YZn1NBC9WOYZeq03LfA5EytC4pc-s_IOOBL2eAnIYESnl5khDCNewhFxmtaICJe-",
     "https://discord.com/api/webhooks/1411987872197771344/eCE-hsRttT7IoGKniS4HINUq1PlF5BKrwmeKgLn96HTD8dkH2DFF28iJmm78Sku2Fi3h"
-  ];
+];
 
 const sendDiscordMessage = async (
     title = "Webhook Processor Logs",
@@ -38,7 +38,7 @@ const sendDiscordMessage = async (
             }
         );
     } catch (error) {
-        console.error("Error sending Discord message:", error);
+        // console.error("Error sending Discord message:", error);
     }
 };
 
@@ -88,6 +88,346 @@ let mongoConversationCollection;
 let mongoSentMsgCollection;
 let mongoPubSubMessagesCollection;
 let mongoBroadcastCollection;
+
+// File locking mechanism to prevent concurrent writes
+const fileLocks = new Map();
+const lockTimeouts = new Map();
+
+// Message sequence tracking for missing message detection
+const sequenceTracker = new Map(); // chatter -> { lastNumber, lastTimestamp, missingNumbers }
+
+// Function to track message sequences and detect missing messages
+const trackMessageSequence = async (chatter, messages) => {
+    const numberedMessages = messages.filter(msg => {
+        const match = msg.Message.match(/^(\w+)\s+(\d+)$/);
+        return match !== null;
+    });
+
+    if (numberedMessages.length === 0) return;
+
+    // Sort by number
+    const sortedMessages = numberedMessages.map(msg => {
+        const match = msg.Message.match(/^(\w+)\s+(\d+)$/);
+        return {
+            number: parseInt(match[2]),
+            message: msg.Message,
+            timestamp: msg.Datetime,
+            messageId: msg.MessageId
+        };
+    }).sort((a, b) => a.number - b.number);
+
+    const sequenceName = sortedMessages[0].message.split(' ')[0];
+    const currentNumbers = sortedMessages.map(m => m.number);
+    const minNumber = Math.min(...currentNumbers);
+    const maxNumber = Math.max(...currentNumbers);
+
+    // Get or create tracker for this chatter
+    let tracker = sequenceTracker.get(chatter) || {
+        sequences: new Map(),
+        lastUpdate: Date.now()
+    };
+
+    // Get or create sequence tracker
+    let sequenceData = tracker.sequences.get(sequenceName) || {
+        lastNumber: 0,
+        lastTimestamp: 0,
+        missingNumbers: new Set(),
+        receivedNumbers: new Set(),
+        totalReceived: 0
+    };
+
+    // Update received numbers
+    currentNumbers.forEach(num => {
+        sequenceData.receivedNumbers.add(num);
+        sequenceData.totalReceived++;
+    });
+
+    // Check for missing numbers in current batch
+    const expectedNumbers = Array.from({ length: maxNumber - minNumber + 1 }, (_, i) => minNumber + i);
+    const missingInBatch = expectedNumbers.filter(n => !currentNumbers.includes(n));
+
+    if (missingInBatch.length > 0) {
+        console.log(`🚨 MISSING MESSAGES DETECTED in current batch for ${chatter}:`);
+        console.log(`  Sequence: ${sequenceName}`);
+        console.log(`  Missing: ${missingInBatch.join(', ')}`);
+        console.log(`  Missing messages: ${missingInBatch.map(n => `${sequenceName} ${n}`).join(', ')}`);
+
+        // Add to missing numbers set
+        missingInBatch.forEach(num => sequenceData.missingNumbers.add(num));
+
+        // Send critical alert
+        await sendDiscordMessage(
+            "CRITICAL: Missing Messages in Current Batch",
+            `🚨 MISSING MESSAGES DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nExpected: ${minNumber} to ${maxNumber}\nMissing: ${missingInBatch.join(', ')}\nMissing Messages: ${missingInBatch.map(n => `${sequenceName} ${n}`).join(', ')}\nReceived: ${currentNumbers.join(', ')}\nTime: ${new Date().toISOString()}`
+        );
+    }
+
+    // Check for gaps with previous data
+    if (sequenceData.lastNumber > 0) {
+        const gapStart = sequenceData.lastNumber + 1;
+        const gapEnd = minNumber - 1;
+
+        if (gapEnd >= gapStart) {
+            const gapNumbers = Array.from({ length: gapEnd - gapStart + 1 }, (_, i) => gapStart + i);
+            console.log(`🚨 GAP DETECTED between batches for ${chatter}:`);
+            console.log(`  Sequence: ${sequenceName}`);
+            console.log(`  Gap: ${gapNumbers.join(', ')}`);
+            console.log(`  Gap messages: ${gapNumbers.map(n => `${sequenceName} ${n}`).join(', ')}`);
+
+            // Add gap numbers to missing set
+            gapNumbers.forEach(num => sequenceData.missingNumbers.add(num));
+
+            // Send gap alert
+            await sendDiscordMessage(
+                "CRITICAL: Message Gap Detected",
+                `🚨 MESSAGE GAP DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nGap: ${gapNumbers.join(', ')}\nGap Messages: ${gapNumbers.map(n => `${sequenceName} ${n}`).join(', ')}\nPrevious: ${sequenceName} ${sequenceData.lastNumber}\nCurrent: ${sequenceName} ${minNumber}\nTime: ${new Date().toISOString()}`
+            );
+        }
+    }
+
+    // Update tracker
+    sequenceData.lastNumber = maxNumber;
+    sequenceData.lastTimestamp = Math.max(...sortedMessages.map(m => m.timestamp));
+    tracker.sequences.set(sequenceName, sequenceData);
+    tracker.lastUpdate = Date.now();
+    sequenceTracker.set(chatter, tracker);
+
+    // Log summary
+    console.log(`📊 Sequence tracking summary for ${chatter}:`);
+    console.log(`  Sequence: ${sequenceName}`);
+    console.log(`  Range: ${minNumber} to ${maxNumber}`);
+    console.log(`  Received: ${currentNumbers.length} messages`);
+    console.log(`  Missing in batch: ${missingInBatch.length}`);
+    console.log(`  Total missing: ${sequenceData.missingNumbers.size}`);
+    console.log(`  Total received: ${sequenceData.totalReceived}`);
+
+    return {
+        sequenceName,
+        minNumber,
+        maxNumber,
+        received: currentNumbers.length,
+        missingInBatch: missingInBatch.length,
+        totalMissing: sequenceData.missingNumbers.size,
+        totalReceived: sequenceData.totalReceived
+    };
+};
+
+// Lock timeout (5 minutes)
+// FIXED: Better file locking with longer timeout
+const LOCK_TIMEOUT = 10 * 60 * 1000; // 10 minutes for large files
+
+const acquireFileLock = async (filePath) => {
+    const lockKey = `lock_${filePath}`;
+    const startTime = Date.now();
+    const maxWaitTime = 60000; // 60 seconds max wait
+
+    while (fileLocks.has(lockKey)) {
+        if (Date.now() - startTime > maxWaitTime) {
+            const waitingTime = Date.now() - startTime;
+            console.error(`🚨 File lock timeout for ${filePath} after ${waitingTime}ms`);
+            throw new Error(`File lock timeout for ${filePath} after ${waitingTime}ms`);
+        }
+        console.log(`⏳ Waiting for file lock: ${filePath} (${Date.now() - startTime}ms)`);
+        await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms
+    }
+
+    fileLocks.set(lockKey, Date.now());
+
+    // Set timeout to automatically release lock
+    const timeoutId = setTimeout(() => {
+        if (fileLocks.has(lockKey)) {
+            fileLocks.delete(lockKey);
+            lockTimeouts.delete(lockKey);
+            console.warn(`⚠️ File lock automatically released for ${filePath} due to timeout`);
+        }
+    }, LOCK_TIMEOUT);
+
+    lockTimeouts.set(lockKey, timeoutId);
+    console.log(`🔒 File lock acquired for ${filePath}`);
+    return lockKey;
+};
+
+const releaseFileLock = (lockKey) => {
+    if (fileLocks.has(lockKey)) {
+        fileLocks.delete(lockKey);
+        const timeoutId = lockTimeouts.get(lockKey);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            lockTimeouts.delete(lockKey);
+        }
+        console.log(`File lock released for ${lockKey}`);
+    }
+};
+
+// Enhanced file save with retry and locking
+const saveFileWithLock = async (file, content, options = {}, maxRetries = 3) => {
+    const filePath = file.name;
+    let lockKey = null;
+
+    try {
+        // Acquire file lock
+        lockKey = await acquireFileLock(filePath);
+
+        // Retry logic with exponential backoff
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await file.save(content, {
+                    contentType: "application/json",
+                    resumable: attempt > 1,
+                    ...options
+                });
+
+                console.log(`✅ File saved successfully: ${filePath} (attempt ${attempt})`);
+                return true;
+
+            } catch (error) {
+                console.error(`❌ File save attempt ${attempt} failed for ${filePath}:`, error.message);
+
+                if (attempt === maxRetries) {
+                    throw error;
+                }
+
+                // Exponential backoff: 1s, 2s, 4s
+                const delay = Math.pow(2, attempt - 1) * 1000;
+                console.log(`⏳ Retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+    } finally {
+        // Always release the lock
+        if (lockKey) {
+            releaseFileLock(lockKey);
+        }
+    }
+};
+
+// Enhanced file processing with proper message merging
+const processFileWithLock = async (file, eventData, dateAccChats, chatKey) => {
+    const filePath = file.name;
+    let lockKey = null;
+
+    try {
+        // Acquire file lock
+        lockKey = await acquireFileLock(filePath);
+
+        // Download file with retry
+        const buffer = await downloadFileWithRetry(file);
+        const fileContent = buffer.toString("utf8");
+        let existingContent = JSON.parse(fileContent);
+
+        // Merge name mappings
+        for (let name in eventData.nameMapping) {
+            if (!existingContent.nameMapping[name]) {
+                existingContent.nameMapping[name] = "";
+            }
+            if (eventData.nameMapping[name]) {
+                existingContent.nameMapping[name] = eventData.nameMapping[name];
+            }
+        }
+
+        // Process and merge messages for each chatter
+        for (let chatter in dateAccChats[chatKey]) {
+
+            // Initialize chatter array if it doesn't exist
+            if (!existingContent.chatters.hasOwnProperty(chatter)) {
+                existingContent.chatters[chatter] = [];
+            } else {
+                console.log(`📁 Existing chatter array for ${chatter} has ${existingContent.chatters[chatter].length} messages`);
+            }
+
+            // Get existing messages for this chatter
+            const existingMessages = existingContent.chatters[chatter];
+
+            // ENHANCED DEDUPLICATION: Only filter true duplicates (same MessageId AND same content AND same timestamp)
+            const existingMessageMap = new Map();
+
+            // Create a map of existing messages for comprehensive comparison
+            existingMessages.forEach(msg => {
+                const key = `${msg.MessageId}_${msg.Datetime}_${msg.Message?.substring(0, 50)}`;
+                existingMessageMap.set(key, msg);
+            });
+
+            console.log(`🔍 Processing ${dateAccChats[chatKey][chatter].length} messages for ${chatter}`);
+            console.log(`📋 Existing messages: ${existingMessages.length}`);
+
+            // Filter out only true duplicates
+            const newMessages = dateAccChats[chatKey][chatter].filter(newMsg => {
+                const newKey = `${newMsg.MessageId}_${newMsg.Datetime}_${newMsg.Message?.substring(0, 50)}`;
+                const isDuplicate = existingMessageMap.has(newKey);
+
+                if (isDuplicate) {
+                    console.log(`⚠️ Skipping duplicate message: ${newMsg.MessageId} (${newMsg.Message}) - ${new Date(newMsg.Datetime).toISOString()}`);
+                    return false;
+                }
+                return true;
+            });
+
+            if (newMessages.length > 0) {
+                console.log(`  Adding ${newMessages.length} new messages to ${chatter} (${dateAccChats[chatKey][chatter].length - newMessages.length} duplicates skipped)`);
+
+                // Log each new message being added
+                newMessages.forEach((msg, index) => {
+                    console.log(`  📝 ${index + 1}. ${msg.Message} (${msg.MessageId}) - ${new Date(msg.Datetime).toISOString()}`);
+                });
+
+                // Append new messages after existing messages
+                existingContent.chatters[chatter] = [
+                    ...existingContent.chatters[chatter],
+                    ...newMessages,
+                ];
+
+                // Sort all messages by timestamp to maintain proper sequence
+                existingContent.chatters[chatter] = existingContent.chatters[chatter].sort((a, b) => a.Datetime - b.Datetime);
+
+                // Validate no messages were lost
+                const finalCount = existingContent.chatters[chatter].length;
+                const expectedCount = existingMessages.length + newMessages.length;
+                if (finalCount !== expectedCount) {
+                    console.error(`🚨 MESSAGE COUNT MISMATCH for ${chatter}: expected ${expectedCount}, got ${finalCount}`);
+                }
+            } else {
+                console.log(`  No new messages to add for ${chatter} (all were duplicates)`);
+            }
+        }
+
+        // Save updated content
+        await file.save(JSON.stringify(existingContent, null, 2), {
+            contentType: "application/json"
+        });
+
+        console.log(`✅ File updated successfully: ${filePath}`);
+        return true;
+
+    } catch (error) {
+        console.error(`❌ Error processing file ${filePath}:`, error);
+        throw error;
+    } finally {
+        // Always release the lock
+        if (lockKey) {
+            releaseFileLock(lockKey);
+        }
+    }
+};
+
+// Enhanced file download with retry
+const downloadFileWithRetry = async (file, maxRetries = 3) => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const [buffer] = await file.download();
+            return buffer;
+        } catch (error) {
+            console.error(`❌ File download attempt ${attempt} failed for ${file.name}:`, error.message);
+
+            if (attempt === maxRetries) {
+                throw error;
+            }
+
+            const delay = Math.pow(2, attempt - 1) * 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+};
 
 // --- Connect to MongoDB ---
 async function connectToMongo() {
@@ -188,12 +528,12 @@ const findBroadcastRecordWithFallback = async (whatsappMessageId, recipientPhone
 
         if (record) {
             console.log(`✅ Found broadcast record by fallback query, updating with message ID: ${whatsappMessageId}`);
-            
+
             // Update the record with the actual message ID
             await mongoBroadcastCollection.updateOne(
                 { _id: record._id },
-                { 
-                    $set: { 
+                {
+                    $set: {
                         whatsapp_message_id: whatsappMessageId,
                         processing_status: "PENDING_WEBHOOK",
                         updated_at: new Date()
@@ -243,7 +583,7 @@ const findTemplateCodeWithRetry = async (
                     return {
                         template_code: broadcastRecord.template_id,
                         source: "broadcast_collection",
-                    }; 
+                    };
                 }
             }
 
@@ -266,8 +606,7 @@ const findTemplateCodeWithRetry = async (
             sendDiscordMessage("Template Lookup Error - Retry", `🚨 Template lookup failed for message ${msgId} after ${attempts} attempts. Error: ${err.message}`);
         } catch (err) {
             console.error(
-                `Retry attempt ${
-                    attempt + 1
+                `Retry attempt ${attempt + 1
                 } failed during template lookup for ${msgId}:`,
                 err
             );
@@ -287,7 +626,7 @@ const findTemplateCodeWithFallback = async (msgId, recipientPhoneNumber, include
     try {
         // First try the fallback broadcast record lookup
         const broadcastRecord = await findBroadcastRecordWithFallback(msgId, recipientPhoneNumber);
-        
+
         if (broadcastRecord && broadcastRecord.template_id) {
             console.log(`✅ Template found via fallback broadcast lookup: ${broadcastRecord.template_id}`);
             return {
@@ -511,9 +850,8 @@ async function createLastMessages(
 
         for (const chat of chatters[chatter]) {
             if (!existingDates.has(chat.Date)) {
-                const filePath = `${orgId}/${chat.Date.split("-")[0]}/${
-                    chat.Date.split("-")[1]
-                }/${chat.Date.split("-")[2]}/${backupUser}.json`;
+                const filePath = `${orgId}/${chat.Date.split("-")[0]}/${chat.Date.split("-")[1]
+                    }/${chat.Date.split("-")[2]}/${backupUser}.json`;
 
                 chatsArray.push({
                     date: chat.Date,
@@ -762,7 +1100,7 @@ async function checkForSendFormat(eventData) {
                 if (status.conversation?.origin?.type === "marketing") {
                     try {
                         const result = await findTemplateCodeWithFallback(
-                            msgId, 
+                            msgId,
                             to, // recipient phone number for fallback query
                             false // don't include sentWaba fallback
                         );
@@ -933,7 +1271,7 @@ async function checkForSendFormat(eventData) {
         console.log("⚠️ No org_id found, using default for testing");
         org_id = "missing_org_id"; // Use default org_id for testing
     }
-    
+
     if (!uid) {
         console.log("⚠️ No uid found, using default for testing");
         uid = "missing_uid"; // Use default workspace_id for testing
@@ -965,14 +1303,11 @@ async function checkForSendFormat(eventData) {
             // Log template processing start
             sendDiscordMessage(
                 "Template Processing Started - Outgoing",
-                `🚀 Starting template lookup for outgoing message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
-                    sentMsg.type
-                }\nStatus: ${status.status}\nExisting Record: ${
-                    sentMsg
-                        ? `Type: ${sentMsg.type}, Template ID: ${
-                              sentMsg.template_id || "None"
-                          }, Last Message: ${sentMsg.last_message || "None"}`
-                        : "None"
+                `🚀 Starting template lookup for outgoing message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${sentMsg.type
+                }\nStatus: ${status.status}\nExisting Record: ${sentMsg
+                    ? `Type: ${sentMsg.type}, Template ID: ${sentMsg.template_id || "None"
+                    }, Last Message: ${sentMsg.last_message || "None"}`
+                    : "None"
                 }`
             );
 
@@ -988,7 +1323,7 @@ async function checkForSendFormat(eventData) {
             } else {
                 // Use enhanced fallback helper with broadcast record fallback logic
                 const result = await findTemplateCodeWithFallback(
-                    msgId, 
+                    msgId,
                     to, // recipient phone number for fallback query
                     !!(sentMsg && sentMsg.type === "template")
                 );
@@ -1006,8 +1341,7 @@ async function checkForSendFormat(eventData) {
                     // Only log info for non-template messages when no template found
                     sendDiscordMessage(
                         "No Template Found - Outgoing",
-                        `ℹ️ No template found for non-template message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
-                            sentMsg?.type || "unknown"
+                        `ℹ️ No template found for non-template message\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${sentMsg?.type || "unknown"
                         }`
                     );
                 } else {
@@ -1090,10 +1424,8 @@ async function checkForSendFormat(eventData) {
         );
         sendDiscordMessage(
             "Template Validation Failed - Outgoing",
-            `🚨 Template message validation failed\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${
-                sentMsg.type
-            }\nTemplate ID: ${sentMsg.template_id || "None"}\nLast Message: ${
-                sentMsg.last_message || "None"
+            `🚨 Template message validation failed\nMessage ID: ${msgId}\nFrom: ${from}\nTo: ${to}\nMessage Type: ${sentMsg.type
+            }\nTemplate ID: ${sentMsg.template_id || "None"}\nLast Message: ${sentMsg.last_message || "None"
             }\nFallback Attempted: Yes`
         );
     }
@@ -1113,7 +1445,7 @@ async function checkForSendFormat(eventData) {
         try {
             // Final attempt with enhanced fallback logic
             const result = await findTemplateCodeWithFallback(
-                msgId, 
+                msgId,
                 to, // recipient phone number for fallback query
                 true // include sentWaba fallback
             );
@@ -1147,12 +1479,12 @@ async function checkForSendFormat(eventData) {
     const finalMessage = template_code
         ? `%%%template%%% ${template_code}`
         : sentMsg.type === "template"
-        ? `[template message - no ID found in any source]`
-        : sentMsg.type === "text" && sentMsg.payload
-        ? sentMsg.payload
-        : sentMsg.type === "text" && sentMsg.last_message
-        ? sentMsg.last_message
-        : sentMsg.last_message || `[${sentMsg.type || "unknown"} message]`;
+            ? `[template message - no ID found in any source]`
+            : sentMsg.type === "text" && sentMsg.payload
+                ? sentMsg.payload
+                : sentMsg.type === "text" && sentMsg.last_message
+                    ? sentMsg.last_message
+                    : sentMsg.last_message || `[${sentMsg.type || "unknown"} message]`;
 
     console.log(`Message processing details:`, {
         msgId: msgId,
@@ -1168,8 +1500,8 @@ async function checkForSendFormat(eventData) {
             sentMsg?.type === "text" && sentMsg?.payload
                 ? "payload"
                 : sentMsg?.type === "template" && template_code
-                ? "template_code"
-                : "last_message",
+                    ? "template_code"
+                    : "last_message",
         template_processing_flow: {
             has_template_code: !!template_code,
             template_code_value: template_code,
@@ -1184,14 +1516,10 @@ async function checkForSendFormat(eventData) {
     // Log final message processing result
     sendDiscordMessage(
         "Message Processing Complete - Outgoing",
-        `📝 Outgoing message processing complete\nMessage ID: ${msgId}\nTemplate Applied: ${
-            template_code ? "Yes" : "No"
-        }\nTemplate Code: ${
-            template_code || "None"
-        }\nFinal Message: ${finalMessage}\nOriginal Type: ${
-            sentMsg.type
-        }\nPayload: ${
-            sentMsg.payload || "Not available"
+        `📝 Outgoing message processing complete\nMessage ID: ${msgId}\nTemplate Applied: ${template_code ? "Yes" : "No"
+        }\nTemplate Code: ${template_code || "None"
+        }\nFinal Message: ${finalMessage}\nOriginal Type: ${sentMsg.type
+        }\nPayload: ${sentMsg.payload || "Not available"
         }\nFrom: ${from}\nTo: ${to}`
     );
 
@@ -1211,12 +1539,12 @@ async function checkForSendFormat(eventData) {
                 ? `template_code from sentWabaMesg_fallback (${template_code})`
                 : `template_code from broadcast_collection (${template_code})`
             : sentMsg.type === "template"
-            ? `template message - no ID found in any source`
-            : sentMsg.type === "text" && sentMsg.payload
-            ? `sentMsg.payload (${sentMsg.payload})`
-            : sentMsg.type === "text" && sentMsg.last_message
-            ? `sentMsg.last_message (${sentMsg.last_message})`
-            : `final fallback`,
+                ? `template message - no ID found in any source`
+                : sentMsg.type === "text" && sentMsg.payload
+                    ? `sentMsg.payload (${sentMsg.payload})`
+                    : sentMsg.type === "text" && sentMsg.last_message
+                        ? `sentMsg.last_message (${sentMsg.last_message})`
+                        : `final fallback`,
     });
 
     let formattedObj = {
@@ -1233,20 +1561,20 @@ async function checkForSendFormat(eventData) {
                     isBroadcast: isBroadcast,
                     broadcastData: isBroadcast
                         ? {
-                              pricing: pricing,
-                          }
+                            pricing: pricing,
+                        }
                         : null,
                     MessageId: msgId,
                     Message: template_code
                         ? `%%%template%%% ${template_code}`
                         : sentMsg.type === "template"
-                        ? `[template message - no ID found in any source]`
-                        : sentMsg.type === "text" && sentMsg.payload
-                        ? sentMsg.payload
-                        : sentMsg.type === "text" && sentMsg.last_message
-                        ? sentMsg.last_message
-                        : sentMsg.last_message ||
-                          `[${sentMsg.type || "unknown"} message]`,
+                            ? `[template message - no ID found in any source]`
+                            : sentMsg.type === "text" && sentMsg.payload
+                                ? sentMsg.payload
+                                : sentMsg.type === "text" && sentMsg.last_message
+                                    ? sentMsg.last_message
+                                    : sentMsg.last_message ||
+                                    `[${sentMsg.type || "unknown"} message]`,
                     Chatid: `${to}@c.us`,
                     File: null,
                     Ack: 1,
@@ -1260,11 +1588,11 @@ async function checkForSendFormat(eventData) {
                         sentMsg.type === "text" && sentMsg.payload
                             ? { payload: sentMsg.payload }
                             : sentMsg.type === "template" && template_code
-                            ? {
-                                  template_id: template_code,
-                                  template_message: `%%%template%%% ${template_code}`,
-                              }
-                            : sentMsg.last_message || {},
+                                ? {
+                                    template_id: template_code,
+                                    template_message: `%%%template%%% ${template_code}`,
+                                }
+                                : sentMsg.last_message || {},
                     Type: sentMsg.type || "",
                 },
             ],
@@ -1429,8 +1757,16 @@ async function checkForReplyFormat(eventData) {
 }
 
 async function detectingAndModifyingDataFormat(eventData) {
-    console.log("🔍 detectingAndModifyingDataFormat called with:", JSON.stringify(eventData, null, 2));
-    
+    // console.log("🔍 detectingAndModifyingDataFormat called with:", JSON.stringify(eventData, null, 2));
+
+    // Log data structure analysis (essential for debugging)
+    if (!eventData?.orgId || !eventData?.phoneNumber || !eventData?.chatters) {
+        console.log("📊 Data structure analysis: Missing required fields");
+        console.log(`  orgId: ${eventData?.orgId ? '✅' : '❌'}`);
+        console.log(`  phoneNumber: ${eventData?.phoneNumber ? '✅' : '❌'}`);
+        console.log(`  chatters: ${eventData?.chatters ? '✅' : '❌'}`);
+    }
+
     if (
         // eventData?.mode && eventData?.mode === "EXT" &&
         eventData?.orgId &&
@@ -1442,10 +1778,10 @@ async function detectingAndModifyingDataFormat(eventData) {
         console.log("✅ Data format is already correct, returning as-is");
         return eventData;
     }
-    
+
     console.log("🔄 Data format needs processing, checking for send/reply formats...");
 
-    
+
     console.log(
         "------------****************> extractedData 1start <---------------------------"
     );
@@ -1456,7 +1792,7 @@ async function detectingAndModifyingDataFormat(eventData) {
 
     let sendFormatResult = await checkForSendFormat(eventData);
     // Discord log for sendFormatResult
-    
+
     console.log(JSON.stringify(sendFormatResult));
     console.log("--> sendFormatResult");
     if (sendFormatResult) {
@@ -1475,7 +1811,7 @@ async function detectingAndModifyingDataFormat(eventData) {
         return replyFormatResult;
     }
 
-    
+
     console.log("---------------------2 START----------------------");
     console.log(JSON.stringify(eventData));
     console.log("---------------------2 END----------------------");
@@ -1505,19 +1841,167 @@ async function updatePubSubMessageStatus(
     );
 }
 
+// ENHANCED: Comprehensive backup validation
+const validateBackupIntegrity = async (originalEventData, processedDateAccChats) => {
+    try {
+        console.log("🔍 Starting comprehensive backup validation...");
+
+        let originalMessageCount = 0;
+        let processedMessageCount = 0;
+        let missingMessages = [];
+
+        // Count original messages
+        for (let chatter in originalEventData.chatters) {
+            originalMessageCount += originalEventData.chatters[chatter].length;
+        }
+
+        // Count processed messages
+        for (let date in processedDateAccChats) {
+            for (let chatter in processedDateAccChats[date]) {
+                processedMessageCount += processedDateAccChats[date][chatter].length;
+            }
+        }
+
+        // Find missing messages
+        for (let chatter in originalEventData.chatters) {
+            const originalMessages = originalEventData.chatters[chatter];
+            let foundInProcessed = false;
+
+            // Check if this chatter exists in any date
+            for (let date in processedDateAccChats) {
+                if (processedDateAccChats[date][chatter]) {
+                    foundInProcessed = true;
+                    break;
+                }
+            }
+
+            if (!foundInProcessed) {
+                missingMessages.push({
+                    chatter: chatter,
+                    reason: "Chatter completely missing from processed data",
+                    messages: originalMessages
+                });
+            }
+        }
+
+        // Log validation results
+        console.log(`📊 Backup Validation Results:`);
+        console.log(`  Original messages: ${originalMessageCount}`);
+        console.log(`  Processed messages: ${processedMessageCount}`);
+        console.log(`  Missing messages: ${originalMessageCount - processedMessageCount}`);
+        console.log(`  Validation: ${originalMessageCount === processedMessageCount ? '✅ PASS' : '❌ FAIL'}`);
+
+        if (missingMessages.length > 0) {
+            console.log(`🚨 Missing chatters: ${missingMessages.length}`);
+            missingMessages.forEach(missing => {
+                console.log(`   - ${missing.chatter}: ${missing.reason} (${missing.messages.length} messages)`);
+            });
+
+            // Send critical alert
+            await sendDiscordMessage(
+                "CRITICAL: Backup Validation Failed",
+                `🚨 BACKUP VALIDATION FAILED\nOriginal: ${originalMessageCount} messages\nProcessed: ${processedMessageCount} messages\nMissing: ${originalMessageCount - processedMessageCount} messages\nMissing Chatters: ${missingMessages.length}`
+            );
+
+            return false;
+        }
+
+        return originalMessageCount === processedMessageCount;
+
+    } catch (error) {
+        console.error("Error during backup validation:", error);
+        await sendDiscordMessage(
+            "Backup Validation Error",
+            `❌ Error during backup validation\nError: ${error.message}`
+        );
+        return false;
+    }
+};
+
+// EMERGENCY: Backup for missing messages
+const emergencyBackupMissingMessages = async (eventData, processedDateAccChats) => {
+    try {
+        console.log("🚨 Starting emergency backup for missing messages...");
+
+        const emergencyFilePath = `${eventData.orgId}/emergency_backup_${Date.now()}.json`;
+        const emergencyFile = bucket.file(emergencyFilePath);
+
+        const emergencyData = {
+            orgId: eventData.orgId,
+            phoneNumber: eventData.phoneNumber,
+            timestamp: new Date().toISOString(),
+            originalEventData: eventData,
+            processedData: processedDateAccChats,
+            validation: "EMERGENCY_BACKUP"
+        };
+
+        await saveFileWithLock(emergencyFile, JSON.stringify(emergencyData, null, 2));
+        console.log(`✅ Emergency backup saved: ${emergencyFilePath}`);
+
+        await sendDiscordMessage(
+            "Emergency Backup Created",
+            `🚨 Emergency backup created due to validation failure\nPath: ${emergencyFilePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+        );
+
+    } catch (error) {
+        console.error("Error creating emergency backup:", error);
+        await sendDiscordMessage(
+            "Emergency Backup Failed",
+            `💥 Emergency backup failed\nError: ${error.message}`
+        );
+    }
+};
+
 const mainEngine = async (req, res) => {
+
+    // ENHANCED BACKUP VALIDATION with comprehensive checking
+    try {
+        const validationResult = await validateBackupIntegrity(eventData, dateAccChats);
+
+        if (!validationResult) {
+            // If validation failed, try emergency backup for missing messages
+            await emergencyBackupMissingMessages(eventData, dateAccChats);
+        } else {
+            console.log(`✅ Backup validation passed! All ${totalMessages} messages successfully processed!`);
+
+            // Send success notification
+            await sendDiscordMessage(
+                "Backup Success",
+                `✅ Backup completed successfully\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nMessages: ${totalMessages}\nDates: ${Object.keys(dateAccChats).length}`
+            );
+        }
+    } catch (validationError) {
+        console.error("Error during backup validation:", validationError);
+        await sendDiscordMessage(
+            "Backup Validation Error",
+            `❌ Error during backup validation\nError: ${validationError.message}`
+        );
+    }
     try {
         console.log("🚀 mainEngine started");
         const startTime = Date.now();
         const extractedData = extractEventData(req);
-        console.log("📥 Extracted data:", JSON.stringify(extractedData, null, 2));
-        
+        // console.log("📥 Extracted data:", JSON.stringify(extractedData, null, 2));
+
+        // Log raw request body for debugging (only if needed)
+        // console.log("🔍 RAW REQUEST BODY:", JSON.stringify(req.body, null, 2));
+
         if (!extractedData.workspace_id) {
             // sendDiscordMessage("Extracted Data", JSON.stringify(extractedData));
         }
         let eventData = await detectingAndModifyingDataFormat(extractedData);
-        console.log("🔄 Event data after format detection:", JSON.stringify(eventData, null, 2));
-        
+        // console.log("🔄 Event data after format detection:", JSON.stringify(eventData, null, 2));
+
+        // Log final event data structure (essential for debugging)
+        if (eventData && eventData.chatters) {
+            console.log("📊 Event data analysis: Total chatters:", Object.keys(eventData.chatters).length);
+            for (let chatter in eventData.chatters) {
+                console.log(`  📱 ${chatter}: ${eventData.chatters[chatter].length} messages`);
+            }
+        } else {
+            console.error("❌ CRITICAL: eventData.chatters is missing or invalid!");
+        }
+
         if (!eventData.workspace_id) {
             // sendDiscordMessage("Event Data", JSON.stringify(eventData));
         }
@@ -1610,11 +2094,9 @@ const mainEngine = async (req, res) => {
             !eventData.chatters ||
             Object.keys(eventData.chatters).length === 0
         ) {
-            const errorMsg = `Backup prerequisites not met:\nOrg ID: ${
-                eventData.orgId
-            }\nPhone: ${eventData.phoneNumber}\nChatters: ${
-                Object.keys(eventData.chatters).length
-            }`;
+            const errorMsg = `Backup prerequisites not met:\nOrg ID: ${eventData.orgId
+                }\nPhone: ${eventData.phoneNumber}\nChatters: ${Object.keys(eventData.chatters).length
+                }`;
             console.error(errorMsg);
             await sendDiscordMessage(
                 "Backup Prerequisites Failed",
@@ -1700,35 +2182,170 @@ const mainEngine = async (req, res) => {
         );
         console.log("📱 Total chatters =>", toPhoneNumberArray.length);
 
+        // Count total messages being processed
+        let totalMessages = 0;
+        let uniqueMessageIds = new Set();
+        let duplicateMessageIds = new Set();
+
+        for (let chatter in eventData.chatters) {
+            const chatterMessages = eventData.chatters[chatter];
+            totalMessages += chatterMessages.length;
+
+            // Check for duplicate MessageIds in the incoming data
+            chatterMessages.forEach(msg => {
+                if (uniqueMessageIds.has(msg.MessageId)) {
+                    duplicateMessageIds.add(msg.MessageId);
+                    console.warn(`🚨 DUPLICATE MessageId detected in incoming data: ${msg.MessageId} (${msg.Message})`);
+                } else {
+                    uniqueMessageIds.add(msg.MessageId);
+                }
+            });
+        }
+
+        console.log(`📨 Total messages to process: ${totalMessages}`);
+        console.log(`📋 Unique MessageIds: ${uniqueMessageIds.size}`);
+        console.log(`⚠️ Duplicate MessageIds in incoming data: ${duplicateMessageIds.size}`);
+
+        if (duplicateMessageIds.size > 0) {
+            console.log(`🚨 Duplicate MessageIds found:`, Array.from(duplicateMessageIds));
+            await sendDiscordMessage(
+                "Duplicate MessageIds Detected",
+                `🚨 Found ${duplicateMessageIds.size} duplicate MessageIds in incoming webhook data\nDuplicates: ${Array.from(duplicateMessageIds).join(', ')}\nTotal Messages: ${totalMessages}\nUnique Messages: ${uniqueMessageIds.size}`
+            );
+        }
+
+        // Log message inventory (essential for debugging)
+        console.log(`📨 Message inventory: ${totalMessages} total messages`);
+        for (let chatter in eventData.chatters) {
+            console.log(`  📱 ${chatter}: ${eventData.chatters[chatter].length} messages`);
+
+            // CRITICAL: Analyze message sequence for gaps
+            const messages = eventData.chatters[chatter];
+            if (messages.length > 0) {
+                console.log(`🔍 Analyzing message sequence for ${chatter}:`);
+
+                // Sort messages by timestamp
+                const sortedMessages = messages.sort((a, b) => a.Datetime - b.Datetime);
+
+                // Check for gaps in sequence
+                let sequenceGaps = [];
+                for (let i = 1; i < sortedMessages.length; i++) {
+                    const prevMsg = sortedMessages[i - 1];
+                    const currMsg = sortedMessages[i];
+                    const timeDiff = currMsg.Datetime - prevMsg.Datetime;
+
+                    // If there's a significant time gap (> 2 seconds), it might indicate missing messages
+                    if (timeDiff > 2000) {
+                        sequenceGaps.push({
+                            gap: timeDiff,
+                            between: `${prevMsg.Message} → ${currMsg.Message}`,
+                            timestamps: `${new Date(prevMsg.Datetime).toISOString()} → ${new Date(currMsg.Datetime).toISOString()}`
+                        });
+                    }
+                }
+
+                if (sequenceGaps.length > 0) {
+                    console.log(`⚠️ SEQUENCE GAPS DETECTED in ${chatter}:`);
+                    sequenceGaps.forEach((gap, index) => {
+                        console.log(`  ${index + 1}. Gap: ${gap.gap}ms between ${gap.between}`);
+                        console.log(`     ${gap.timestamps}`);
+                    });
+
+                    // Send Discord alert for sequence gaps
+                    await sendDiscordMessage(
+                        "Message Sequence Gaps Detected",
+                        `⚠️ SEQUENCE GAPS DETECTED\nChatter: ${chatter}\nGaps: ${sequenceGaps.length}\nDetails:\n${sequenceGaps.map(gap => `- ${gap.gap}ms between ${gap.between}`).join('\n')}`
+                    );
+                } else {
+                    console.log(`✅ No sequence gaps detected in ${chatter}`);
+                }
+
+                // Log message details for analysis
+                console.log(`📋 Message details for ${chatter}:`);
+                sortedMessages.forEach((msg, index) => {
+                    console.log(`  ${index + 1}. ${msg.Message} (${msg.MessageId}) - ${new Date(msg.Datetime).toISOString()}`);
+                });
+
+                // CRITICAL: Use enhanced sequence tracking
+                const sequenceResult = await trackMessageSequence(chatter, messages);
+
+                if (sequenceResult) {
+                    console.log(`🔢 Sequence tracking completed for ${chatter}:`);
+                    console.log(`  Sequence: ${sequenceResult.sequenceName}`);
+                    console.log(`  Range: ${sequenceResult.minNumber} to ${sequenceResult.maxNumber}`);
+                    console.log(`  Received: ${sequenceResult.received} messages`);
+                    console.log(`  Missing in batch: ${sequenceResult.missingInBatch}`);
+                    console.log(`  Total missing: ${sequenceResult.totalMissing}`);
+                    console.log(`  Total received: ${sequenceResult.totalReceived}`);
+                }
+            }
+        }
+
+        // CRITICAL FIX: Clean up duplicate MessageIds from incoming data
+        if (duplicateMessageIds.size > 0) {
+            console.log(`🧹 Cleaning up ${duplicateMessageIds.size} duplicate MessageIds from incoming data...`);
+
+            for (let chatter in eventData.chatters) {
+                const originalCount = eventData.chatters[chatter].length;
+                const seenMessageIds = new Set();
+
+                // Keep only the first occurrence of each MessageId
+                eventData.chatters[chatter] = eventData.chatters[chatter].filter(msg => {
+                    if (seenMessageIds.has(msg.MessageId)) {
+                        console.log(`🗑️ Removing duplicate MessageId: ${msg.MessageId} (${msg.Message})`);
+                        return false;
+                    }
+                    seenMessageIds.add(msg.MessageId);
+                    return true;
+                });
+
+                const cleanedCount = eventData.chatters[chatter].length;
+                if (originalCount !== cleanedCount) {
+                    console.log(`✅ Cleaned ${chatter}: ${originalCount} → ${cleanedCount} messages (removed ${originalCount - cleanedCount} duplicates)`);
+                }
+            }
+
+            // Recalculate totals after cleanup
+            totalMessages = 0;
+            for (let chatter in eventData.chatters) {
+                totalMessages += eventData.chatters[chatter].length;
+            }
+            console.log(`📊 After cleanup: ${totalMessages} unique messages to process`);
+        }
+
 
         let startTimeLastMsgOne = Date.now();
 
-        let lastMessageOfChatters = await mongoConversationCollection
-            .find({
-                from: eventData.phoneNumber,
-                to: { $in: toPhoneNumberArray },
-                projection: {
-                    _id: 0,
-                    to: 1,
-                    last_message_time: 1,
-                },
-            })
-            .toArray();
-        
+        // CRITICAL FIX: Skip last message time lookup to prevent message filtering
+        // The previous logic was causing messages to be filtered out based on timestamps
+        // We want to backup ALL messages regardless of when they were sent
 
+        // Keep the map empty to ensure no filtering occurs
         let lastMessageOfChattersMap = {};
-        for (let message of lastMessageOfChatters) {
-            lastMessageOfChattersMap[message.to] = message.last_message_time;
-        }
 
+        // FIXED: Enhanced message processing without aggressive filtering
+        console.log(`🔄 Processing messages into dateAccChats...`);
         for (let chatter in eventData.chatters) {
-            let getLastMessageTime =
-                lastMessageOfChattersMap[chatter.split("@")[0]];
+            // Sort messages by timestamp to maintain sequence
+            const sortedMessages = eventData.chatters[chatter].sort((a, b) => a.Datetime - b.Datetime);
 
-            for (let chat of eventData.chatters[chatter]) {
+            let processedCount = 0;
+            let skippedCount = 0;
+
+            for (let chat of sortedMessages) {
                 let chatDate = chat.Date;
-                if (getLastMessageTime && chat.Datetime <= getLastMessageTime) {
-                    continue;
+
+                // Validate message has required fields but don't skip if some are missing
+                if (!chat.MessageId) {
+                    // Generate a MessageId if missing to prevent data loss
+                    chat.MessageId = `missing_id_${chatter}_${chat.Datetime}_${Math.random().toString(36).substr(2, 9)}`;
+                    console.warn(`⚠️ Generated MessageId for message: ${chat.MessageId}`);
+                }
+
+                if (!chat.Datetime) {
+                    // Use current timestamp if missing
+                    chat.Datetime = Date.now();
+                    console.warn(`⚠️ Generated timestamp for message: ${chat.MessageId}`);
                 }
 
                 if (!dateAccChats.hasOwnProperty(chatDate)) {
@@ -1740,15 +2357,29 @@ const mainEngine = async (req, res) => {
                         dateAccChats[chatDate][chatter].push(chat);
                     }
                 }
+                processedCount++;
             }
+
+            console.log(`📊 ${chatter}: ${processedCount} messages processed`);
+        }
+
+        // Count messages in dateAccChats after processing
+        let processedMessages = 0;
+        for (let date in dateAccChats) {
+            for (let chatter in dateAccChats[date]) {
+                processedMessages += dateAccChats[date][chatter].length;
+            }
+        }
+        if (processedMessages !== totalMessages) {
+            console.log(`⚠️ Message count mismatch: ${totalMessages} received, ${processedMessages} processed`);
         }
 
         // Process data for BigQuery after dateAccChats is created
         try {
             console.log("🚀 Starting BigQuery processing...");
             const bigQueryResult = await bigQueryProcessor(dateAccChats, eventData.orgId, eventData.uid ?? eventData.workspace_id ?? null);
-            console.log(`✅ BigQuery processing completed: ${bigQueryResult}`);
-            
+            // console.log(`✅ BigQuery processing completed: ${bigQueryResult}`);
+
             // Log successful BigQuery processing
             // sendDiscordMessage(
             //     "BigQuery Processing Success",
@@ -1790,7 +2421,7 @@ const mainEngine = async (req, res) => {
                 `❌ Failed to create/update last messages\nOrg ID: ${eventData?.orgId}\nPhone: ${eventData?.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
             );
         }
-       
+
 
         // Log file processing start
         const totalDates = Object.keys(dateAccChats).length;
@@ -1803,9 +2434,15 @@ const mainEngine = async (req, res) => {
 
         for (let chatKey in dateAccChats) {
             processedDates++;
-            const filePath = `${eventData.orgId}/${chatKey.split("-")[0]}/${
-                chatKey.split("-")[1]
-            }/${chatKey.split("-")[2]}/${eventData.phoneNumber}.json`;
+            const filePath = `${eventData.orgId}/${chatKey.split("-")[0]}/${chatKey.split("-")[1]
+                }/${chatKey.split("-")[2]}/${eventData.phoneNumber}.json`;
+
+            // Count messages for this date
+            let messagesForDate = 0;
+            for (let chatter in dateAccChats[chatKey]) {
+                messagesForDate += dateAccChats[chatKey][chatter].length;
+            }
+            console.log(`📅 Processing date ${chatKey}: ${messagesForDate} messages`);
 
             const file = await bucket.file(filePath);
             let [fileExists] = await file.exists();
@@ -1828,21 +2465,10 @@ const mainEngine = async (req, res) => {
                 };
 
                 try {
-                    await file.save(JSON.stringify(fileData, null, 2), {
-                        contentType: "application/json",
-                        resumable: false,
-                    });
-
-                    // Log successful file creation
-                    // await sendDiscordMessage(
-                    //     "GCS File Creation Success",
-                    //     `✅ Successfully created GCS file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nDate: ${chatKey}`
-                    // );
+                    await saveFileWithLock(file, JSON.stringify(fileData, null, 2));
+                    console.log(`✅ New file created successfully: ${filePath}`);
                 } catch (uploadError) {
-                    console.error(
-                        `GCS upload error for ${filePath}:`,
-                        uploadError
-                    );
+                    console.error(`❌ Failed to create new file ${filePath}:`, uploadError);
 
                     // Log upload error
                     await sendDiscordMessage(
@@ -1850,132 +2476,32 @@ const mainEngine = async (req, res) => {
                         `❌ GCS upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${uploadError.message}`
                     );
 
-                    try {
-                        await new Promise((resolve) => setTimeout(resolve, 5000));
-                        await file.save(JSON.stringify(fileData, null, 2), {
-                            contentType: "application/json",
-                            resumable: true,
-                        });
-
-                        // Log successful retry
-                        await sendDiscordMessage(
-                            "GCS Retry Success",
-                            `🔄 GCS retry upload successful\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
-                        );
-                    } catch (retryError) {
-                        console.error(
-                            `GCS retry upload failed for ${filePath}:`,
-                            retryError
-                        );
-
-                        // Log retry failure
-                        await sendDiscordMessage(
-                            "GCS Retry Failed",
-                            `💥 GCS retry upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}\nRetry: ${retryError}`
-                        );
-
-                        throw retryError; // Re-throw to be caught by outer error handler
-                    }
+                    throw uploadError; // Re-throw to be caught by outer error handler
                 }
                 continue;
             }
 
-            const [buffer] = await file.download();
-
             try {
-                const fileContent = buffer.toString("utf8");
-                let existingContent = JSON.parse(fileContent);
+                console.log(`🔧 Processing existing file: ${filePath} (${messagesForDate} messages)`);
 
-                for (let name in eventData.nameMapping) {
-                    if (!existingContent.nameMapping[name]) {
-                        existingContent.nameMapping[name] = "";
-                    }
-                    if (eventData.nameMapping[name]) {
-                        existingContent.nameMapping[name] =
-                            eventData.nameMapping[name];
-                    }
+                // Use the new enhanced file processing function
+                const processResult = await processFileWithLock(file, eventData, dateAccChats, chatKey);
+
+                if (!processResult) {
+                    console.error(`❌ File processing failed: ${filePath}`);
+                    throw new Error(`File processing failed for ${filePath}`);
                 }
 
-                for (let chatter in dateAccChats[chatKey]) {
-                    dateAccChats[chatKey][chatter] = dateAccChats[chatKey][
-                        chatter
-                    ].filter((chat) => {
-                        const messageId = chat.MessageId;
-                        if (messageId) {
-                            const messageIdPattern = new RegExp(
-                                `"${messageId}"`,
-                                "i"
-                            );
-                            return !messageIdPattern.test(fileContent);
-                        }
-                        return true;
-                    });
-
-                    if (!existingContent.chatters.hasOwnProperty(chatter)) {
-                        existingContent.chatters[chatter] = [];
-                    }
-
-                    existingContent.chatters[chatter] = [
-                        ...existingContent.chatters[chatter],
-                        ...dateAccChats[chatKey][chatter],
-                    ];
-                }
-
-                try {
-                    await file.save(JSON.stringify(existingContent, null, 2), {
-                        contentType: "application/json",
-                        resumable: false,
-                    });
-
-                    
-                } catch (uploadError) {
-                    console.error(
-                        `GCS update error for ${filePath}:`,
-                        uploadError
-                    );
-
-                    // Log update error
-                    await sendDiscordMessage(
-                        "GCS Update Error",
-                        `❌ GCS update failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${uploadError.message}`
-                    );
-
-                    try {
-                        await new Promise((resolve) => setTimeout(resolve, 5000));
-
-                        await file.save(
-                            JSON.stringify(existingContent, null, 2),
-                            {
-                                contentType: "application/json",
-                                resumable: true,
-                            }
-                        );
-
-                        // Log successful retry
-                        await sendDiscordMessage(
-                            "GCS Update Retry Success",
-                            `🔄 GCS update retry successful\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
-                        );
-                    } catch (retryError) {
-                        console.error(
-                            `GCS retry update failed for ${filePath}:`,
-                            retryError
-                        );
-
-                        // Log retry failure
-                        await sendDiscordMessage(
-                            "GCS Update Retry Failed",
-                            `💥 GCS update retry failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${retryError.message}`
-                        );
-
-                        throw retryError; // Re-throw to be caught by outer error handler
-                    }
-                }
             } catch (error) {
-                console.log("error -------------------------- start");
-                console.log(error);
-                console.log("error -------------------------- end");
-                return false;
+                console.error(`❌ Error processing existing file ${filePath}:`, error);
+
+                // Log error
+                await sendDiscordMessage(
+                    "GCS File Processing Error",
+                    `❌ Error processing file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
+                );
+
+                throw error; // Re-throw to be caught by outer error handler
             }
         }
 
@@ -2021,9 +2547,9 @@ const mainEngine = async (req, res) => {
             }
         }
 
-        // Final backup validation
+        // ENHANCED BACKUP VALIDATION with detailed message tracking
         try {
-            const totalMessages = Object.values(dateAccChats).reduce(
+            const totalBackedUpMessages = Object.values(dateAccChats).reduce(
                 (total, chatterData) => {
                     return (
                         total +
@@ -2038,12 +2564,61 @@ const mainEngine = async (req, res) => {
                 0
             );
 
-            
+            // Validation logging
+            console.log(`🔍 Backup validation: ${totalMessages} received, ${totalBackedUpMessages} processed`);
+
+            if (totalBackedUpMessages !== totalMessages) {
+                console.log(`📊 Breakdown by date:`);
+                for (let date in dateAccChats) {
+                    const dateMessages = Object.values(dateAccChats[date]).reduce((total, messages) => total + messages.length, 0);
+                    console.log(`  📅 ${date}: ${dateMessages} messages`);
+                }
+            }
+
+            // Validate message integrity
+            let validationErrors = [];
+            for (let date in dateAccChats) {
+                for (let chatter in dateAccChats[date]) {
+                    const messages = dateAccChats[date][chatter];
+                    messages.forEach((msg, index) => {
+                        if (!msg.MessageId || !msg.Message || !msg.Datetime) {
+                            validationErrors.push({
+                                date,
+                                chatter,
+                                index,
+                                message: msg,
+                                error: 'Missing required fields'
+                            });
+                        }
+                    });
+                }
+            }
+
+            if (validationErrors.length > 0) {
+                console.error(`❌ Found ${validationErrors.length} validation errors:`);
+                validationErrors.forEach(error => {
+                    console.error(`  - ${error.date}/${error.chatter}[${error.index}]: ${error.error}`, error.message);
+                });
+            }
+
+            if (totalBackedUpMessages !== totalMessages) {
+                const lostMessages = totalMessages - totalBackedUpMessages;
+                console.warn(`⚠️ MESSAGE LOSS DETECTED: ${lostMessages} messages lost`);
+
+                // Send critical alert
+                await sendDiscordMessage(
+                    "CRITICAL: Message Loss Detected",
+                    `🚨 MESSAGE LOSS DETECTED\nOriginal: ${totalMessages}\nProcessed: ${totalBackedUpMessages}\nLost: ${lostMessages}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
+                );
+            } else {
+                console.log(`✅ All ${totalMessages} messages successfully processed!`);
+            }
+
         } catch (validationError) {
             console.error("Error during backup validation:", validationError);
             await sendDiscordMessage(
                 "Backup Validation Error",
-                `❌ Error during backup validation\nError: ${validationError.message}`
+                `❌ Error during backup validation\nError: ${validationError.message}\nStack: ${validationError.stack}`
             );
         }
 
@@ -2056,10 +2631,8 @@ const mainEngine = async (req, res) => {
         // Send comprehensive error notification
         await sendDiscordMessage(
             "Backup Process Failed",
-            `💥 Backup process failed\nOrg ID: ${
-                eventData?.orgId || "Unknown"
-            }\nPhone: ${eventData?.phoneNumber || "Unknown"}\nError: ${
-                error.message
+            `💥 Backup process failed\nOrg ID: ${eventData?.orgId || "Unknown"
+            }\nPhone: ${eventData?.phoneNumber || "Unknown"}\nError: ${error.message
             }\nStack: ${error.stack}\nTime: ${Date.now() - startTime}ms`
         );
 
@@ -2071,7 +2644,20 @@ let count = 0;
 const webhookProcessor = async (req, res) => {
     // const webhookProcessor = async (req, res) => {
     try {
-        console.log("🎯 webhookProcessor called with request body:", JSON.stringify(req.body, null, 2));
+        const webhookId = req?.body?.message?.messageId || `direct_${Date.now()}`;
+        const requestTimestamp = new Date().toISOString();
+
+        console.log("🎯 webhookProcessor called");
+        console.log(`📋 Webhook ID: ${webhookId}`);
+        console.log(`⏰ Request timestamp: ${requestTimestamp}`);
+        console.log(`📊 Request body size: ${JSON.stringify(req.body).length} bytes`);
+
+        // Log webhook request details for monitoring
+        await sendDiscordMessage(
+            "Webhook Request Received",
+            `📥 New webhook request received\nWebhook ID: ${webhookId}\nTimestamp: ${requestTimestamp}\nBody size: ${JSON.stringify(req.body).length} bytes\nSource: ${req.ip || 'unknown'}`
+        );
+
         const startTime = Date.now();
         mainEngine(req, res)
             .then((status) => {
@@ -2091,7 +2677,7 @@ const webhookProcessor = async (req, res) => {
                 } else {
                     throw new Error(
                         "Unacknowledged event with messageId: " +
-                            req?.body?.message?.messageId
+                        req?.body?.message?.messageId
                     );
                 }
             })
