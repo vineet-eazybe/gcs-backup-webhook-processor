@@ -658,68 +658,6 @@ const findTemplateCodeWithFallback = async (msgId, recipientPhoneNumber, include
     }
 };
 
-// Debug function to help track message lookup issues
-async function debugMessageLookup(msgId, from, to, webhookData = null) {
-    try {
-        console.log(`🔍 Debugging message lookup for: ${msgId}`);
-
-        // Check if message exists in sent messages collection
-        const sentMsg = await mongoSentMsgCollection.findOne({ msgId: msgId });
-        if (sentMsg) {
-            console.log(`✅ Message found in sent messages:`, {
-                msgId: sentMsg.msgId,
-                type: sentMsg.type,
-                last_message: sentMsg.last_message,
-                createdAt: sentMsg.createdAt,
-            });
-            return sentMsg;
-        }
-
-        // Check recent messages by phone numbers
-        const recentMessages = await mongoSentMsgCollection
-            .find({
-                from: from,
-                to: to,
-                createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-            })
-            .sort({ createdAt: -1 })
-            .limit(5)
-            .toArray();
-
-        if (recentMessages.length > 0) {
-            console.log(
-                `📱 Found ${recentMessages.length} recent messages:`,
-                recentMessages.map((m) => ({
-                    msgId: m.msgId,
-                    type: m.type,
-                    last_message: m.last_message,
-                    createdAt: m.createdAt,
-                }))
-            );
-        } else {
-            console.log(`❌ No recent messages found for ${from} -> ${to}`);
-        }
-
-        // Analyze webhook data for template indicators
-        if (webhookData) {
-            console.log(`🔍 Webhook data analysis:`, {
-                conversation_origin: webhookData.conversation?.origin?.type,
-                pricing_category: webhookData.pricing?.category,
-                is_marketing:
-                    webhookData.conversation?.origin?.type === "marketing",
-                suggested_type:
-                    webhookData.conversation?.origin?.type === "marketing"
-                        ? "template"
-                        : "text",
-            });
-        }
-
-        return null;
-    } catch (error) {
-        console.error(`Error in debugMessageLookup:`, error);
-        return null;
-    }
-}
 
 // Extracts event data, handling Pub/Sub envelope if present
 function extractEventData(req) {
@@ -2705,13 +2643,13 @@ const webhookProcessor = async (req, res) => {
 
 
 
-// app.post("/", async (req, res) => {
-//     return (await webhookProcessor(req, res))
-// });
+app.post("/", async (req, res) => {
+    return (await webhookProcessor(req, res))
+});
 
-// app.listen(3003, () => {
-//     console.log("Server is listening on PORT =>", 3003);
-// });
+app.listen(3003, () => {
+    console.log("Server is listening on PORT =>", 3003);
+});
 
 // Export for external use
 exports.webhookProcessor = webhookProcessor;
