@@ -156,10 +156,10 @@ const trackMessageSequence = async (chatter, messages) => {
         missingInBatch.forEach(num => sequenceData.missingNumbers.add(num));
 
         // Send critical alert
-        await sendDiscordMessage(
-            "CRITICAL: Missing Messages in Current Batch",
-            `🚨 MISSING MESSAGES DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nExpected: ${minNumber} to ${maxNumber}\nMissing: ${missingInBatch.join(', ')}\nMissing Messages: ${missingInBatch.map(n => `${sequenceName} ${n}`).join(', ')}\nReceived: ${currentNumbers.join(', ')}\nTime: ${new Date().toISOString()}`
-        );
+        // sendDiscordMessage(
+        //     "CRITICAL: Missing Messages in Current Batch",
+        //     `🚨 MISSING MESSAGES DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nExpected: ${minNumber} to ${maxNumber}\nMissing: ${missingInBatch.join(', ')}\nMissing Messages: ${missingInBatch.map(n => `${sequenceName} ${n}`).join(', ')}\nReceived: ${currentNumbers.join(', ')}\nTime: ${new Date().toISOString()}`
+        // );
     }
 
     // Check for gaps with previous data
@@ -178,10 +178,10 @@ const trackMessageSequence = async (chatter, messages) => {
             gapNumbers.forEach(num => sequenceData.missingNumbers.add(num));
 
             // Send gap alert
-            await sendDiscordMessage(
-                "CRITICAL: Message Gap Detected",
-                `🚨 MESSAGE GAP DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nGap: ${gapNumbers.join(', ')}\nGap Messages: ${gapNumbers.map(n => `${sequenceName} ${n}`).join(', ')}\nPrevious: ${sequenceName} ${sequenceData.lastNumber}\nCurrent: ${sequenceName} ${minNumber}\nTime: ${new Date().toISOString()}`
-            );
+            // sendDiscordMessage(
+            //     "CRITICAL: Message Gap Detected",
+            //     `🚨 MESSAGE GAP DETECTED\nChatter: ${chatter}\nSequence: ${sequenceName}\nGap: ${gapNumbers.join(', ')}\nGap Messages: ${gapNumbers.map(n => `${sequenceName} ${n}`).join(', ')}\nPrevious: ${sequenceName} ${sequenceData.lastNumber}\nCurrent: ${sequenceName} ${minNumber}\nTime: ${new Date().toISOString()}`
+            // );
         }
     }
 
@@ -1965,7 +1965,7 @@ async function detectingAndModifyingDataFormat(eventData) {
     console.log(JSON.stringify(sendFormatResult));
     console.log("--> sendFormatResult");
     if (sendFormatResult) {
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "detectingAndModifyingDataFormat",
             `sendFormatResult:\n${JSON.stringify(sendFormatResult)}`
         );
@@ -1977,7 +1977,7 @@ async function detectingAndModifyingDataFormat(eventData) {
     console.log(JSON.stringify(echoFormatResult));
     console.log("--> echoFormatResult");
     if (echoFormatResult) {
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "detectingAndModifyingDataFormat",
             `echoFormatResult:\n${JSON.stringify(echoFormatResult)}`
         );
@@ -2079,7 +2079,7 @@ const validateBackupIntegrity = async (originalEventData, processedDateAccChats)
             });
 
             // Send critical alert
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "CRITICAL: Backup Validation Failed",
                 `🚨 BACKUP VALIDATION FAILED\nOriginal: ${originalMessageCount} messages\nProcessed: ${processedMessageCount} messages\nMissing: ${originalMessageCount - processedMessageCount} messages\nMissing Chatters: ${missingMessages.length}`
             );
@@ -2091,7 +2091,7 @@ const validateBackupIntegrity = async (originalEventData, processedDateAccChats)
 
     } catch (error) {
         console.error("Error during backup validation:", error);
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "Backup Validation Error",
             `❌ Error during backup validation\nError: ${error.message}`
         );
@@ -2119,14 +2119,14 @@ const emergencyBackupMissingMessages = async (eventData, processedDateAccChats) 
         await saveFileWithLock(emergencyFile, JSON.stringify(emergencyData, null, 2));
         console.log(`✅ Emergency backup saved: ${emergencyFilePath}`);
 
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "Emergency Backup Created",
             `🚨 Emergency backup created due to validation failure\nPath: ${emergencyFilePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
         );
 
     } catch (error) {
         console.error("Error creating emergency backup:", error);
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "Emergency Backup Failed",
             `💥 Emergency backup failed\nError: ${error.message}`
         );
@@ -2146,14 +2146,14 @@ const mainEngine = async (req, res) => {
             console.log(`✅ Backup validation passed! All ${totalMessages} messages successfully processed!`);
 
             // Send success notification
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "Backup Success",
                 `✅ Backup completed successfully\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nMessages: ${totalMessages}\nDates: ${Object.keys(dateAccChats).length}`
             );
         }
     } catch (validationError) {
         console.error("Error during backup validation:", validationError);
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "Backup Validation Error",
             `❌ Error during backup validation\nError: ${validationError.message}`
         );
@@ -2279,7 +2279,7 @@ const mainEngine = async (req, res) => {
                 }\nPhone: ${eventData.phoneNumber}\nChatters: ${Object.keys(eventData.chatters).length
                 }`;
             console.error(errorMsg);
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "Backup Prerequisites Failed",
                 `❌ ${errorMsg}`
             );
@@ -2389,7 +2389,7 @@ const mainEngine = async (req, res) => {
 
         if (duplicateMessageIds.size > 0) {
             console.log(`🚨 Duplicate MessageIds found:`, Array.from(duplicateMessageIds));
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "Duplicate MessageIds Detected",
                 `🚨 Found ${duplicateMessageIds.size} duplicate MessageIds in incoming webhook data\nDuplicates: ${Array.from(duplicateMessageIds).join(', ')}\nTotal Messages: ${totalMessages}\nUnique Messages: ${uniqueMessageIds.size}`
             );
@@ -2433,10 +2433,10 @@ const mainEngine = async (req, res) => {
                     });
 
                     // Send Discord alert for sequence gaps
-                    await sendDiscordMessage(
-                        "Message Sequence Gaps Detected",
-                        `⚠️ SEQUENCE GAPS DETECTED\nChatter: ${chatter}\nGaps: ${sequenceGaps.length}\nDetails:\n${sequenceGaps.map(gap => `- ${gap.gap}ms between ${gap.between}`).join('\n')}`
-                    );
+                    // await sendDiscordMessage(
+                    //     "Message Sequence Gaps Detected",
+                    //     `⚠️ SEQUENCE GAPS DETECTED\nChatter: ${chatter}\nGaps: ${sequenceGaps.length}\nDetails:\n${sequenceGaps.map(gap => `- ${gap.gap}ms between ${gap.between}`).join('\n')}`
+                    // );
                 } else {
                     console.log(`✅ No sequence gaps detected in ${chatter}`);
                 }
@@ -2594,7 +2594,7 @@ const mainEngine = async (req, res) => {
             // );
         } catch (bigQueryError) {
             console.error("Error processing data for BigQuery:", bigQueryError);
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "BigQuery Processing Error",
                 `❌ Failed to process data for BigQuery\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${bigQueryError.message}\nStack: ${bigQueryError.stack}`
             );
@@ -2623,7 +2623,7 @@ const mainEngine = async (req, res) => {
             // );
         } catch (error) {
             console.error("Error creating last messages:", error);
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "Backup Creation Error",
                 `❌ Failed to create/update last messages\nOrg ID: ${eventData?.orgId}\nPhone: ${eventData?.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
             );
@@ -2678,7 +2678,7 @@ const mainEngine = async (req, res) => {
                     console.error(`❌ Failed to create new file ${filePath}:`, uploadError);
 
                     // Log upload error
-                    await sendDiscordMessage(
+                    sendDiscordMessage(
                         "GCS Upload Error",
                         `❌ GCS upload failed\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${uploadError.message}`
                     );
@@ -2703,7 +2703,7 @@ const mainEngine = async (req, res) => {
                 console.error(`❌ Error processing existing file ${filePath}:`, error);
 
                 // Log error
-                await sendDiscordMessage(
+                sendDiscordMessage(
                     "GCS File Processing Error",
                     `❌ Error processing file\nPath: ${filePath}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}\nError: ${error.message}\nStack: ${error.stack}`
                 );
@@ -2813,7 +2813,7 @@ const mainEngine = async (req, res) => {
                 console.warn(`⚠️ MESSAGE LOSS DETECTED: ${lostMessages} messages lost`);
 
                 // Send critical alert
-                await sendDiscordMessage(
+                sendDiscordMessage(
                     "CRITICAL: Message Loss Detected",
                     `🚨 MESSAGE LOSS DETECTED\nOriginal: ${totalMessages}\nProcessed: ${totalBackedUpMessages}\nLost: ${lostMessages}\nOrg ID: ${eventData.orgId}\nPhone: ${eventData.phoneNumber}`
                 );
@@ -2823,7 +2823,7 @@ const mainEngine = async (req, res) => {
 
         } catch (validationError) {
             console.error("Error during backup validation:", validationError);
-            await sendDiscordMessage(
+            sendDiscordMessage(
                 "Backup Validation Error",
                 `❌ Error during backup validation\nError: ${validationError.message}\nStack: ${validationError.stack}`
             );
@@ -2836,7 +2836,7 @@ const mainEngine = async (req, res) => {
         console.error("Error processing webhook (inner):", error);
 
         // Send comprehensive error notification
-        await sendDiscordMessage(
+        sendDiscordMessage(
             "Backup Process Failed",
             `💥 Backup process failed\nOrg ID: ${eventData?.orgId || "Unknown"
             }\nPhone: ${eventData?.phoneNumber || "Unknown"}\nError: ${error.message
@@ -2858,12 +2858,6 @@ const webhookProcessor = async (req, res) => {
         console.log(`📋 Webhook ID: ${webhookId}`);
         console.log(`⏰ Request timestamp: ${requestTimestamp}`);
         console.log(`📊 Request body size: ${JSON.stringify(req.body).length} bytes`);
-
-        // Log webhook request details for monitoring
-        await sendDiscordMessage(
-            "Webhook Request Received",
-            `📥 New webhook request received\nWebhook ID: ${webhookId}\nTimestamp: ${requestTimestamp}\nBody size: ${JSON.stringify(req.body).length} bytes\nSource: ${req.ip || 'unknown'}`
-        );
 
         const startTime = Date.now();
         mainEngine(req, res)
