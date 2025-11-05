@@ -339,55 +339,126 @@ const processFileWithLock = async (file, eventData, dateAccChats, chatKey) => {
             // Get existing messages for this chatter
             const existingMessages = existingContent.chatters[chatter];
 
-            // ENHANCED DEDUPLICATION: Only filter true duplicates (same MessageId AND same content AND same timestamp)
-            const existingMessageMap = new Map();
+            // ENHANCED DEDUPLICATION: Handle WAMID deduplication with echo preference
+            // Create a map of existing messages by MessageId (WAMID) for quick lookup
+            const existingMessageMapByWamid = new Map();
 
-            // Create a map of existing messages for comprehensive comparison
-            existingMessages.forEach(msg => {
-                const key = `${msg.MessageId}_${msg.Datetime}_${msg.Message?.substring(0, 50)}`;
-                existingMessageMap.set(key, msg);
+            // Create map of existing messages by WAMID (for echo overwrite detection)
+            existingMessages.forEach((msg, index) => {
+                // Map by WAMID only (for echo overwrite detection)
+                if (msg.MessageId) {
+                    if (!existingMessageMapByWamid.has(msg.MessageId)) {
+                        existingMessageMapByWamid.set(msg.MessageId, { message: msg, index: index });
+                    }
+                }
             });
 
             console.log(`🔍 Processing ${dateAccChats[chatKey][chatter].length} messages for ${chatter}`);
             console.log(`📋 Existing messages: ${existingMessages.length}`);
+            console.log(`🔑 Unique WAMIDs in existing messages: ${existingMessageMapByWamid.size}`);
 
-            // Filter out only true duplicates
-            const newMessages = dateAccChats[chatKey][chatter].filter(newMsg => {
-                const newKey = `${newMsg.MessageId}_${newMsg.Datetime}_${newMsg.Message?.substring(0, 50)}`;
-                const isDuplicate = existingMessageMap.has(newKey);
+            // Process messages with echo preference logic
+            const messagesToAdd = [];
+            const messagesToReplace = [];
 
-                if (isDuplicate) {
-                    console.log(`⚠️ Skipping duplicate message: ${newMsg.MessageId} (${newMsg.Message}) - ${new Date(newMsg.Datetime).toISOString()}`);
-                    return false;
+            dateAccChats[chatKey][chatter].forEach(newMsg => {
+                if (!newMsg.MessageId) {
+                    // Message without ID - add it
+                    messagesToAdd.push(newMsg);
+                    return;
                 }
-                return true;
+
+                // Check if message with same WAMID already exists
+                const hasExistingWamid = existingMessageMapByWamid.has(newMsg.MessageId);
+
+                if (hasExistingWamid) {
+                    const existingData = existingMessageMapByWamid.get(newMsg.MessageId);
+                    const existingMsg = existingData.message;
+                    const existingIndex = existingData.index;
+                    
+                    // Check if new message is from echo
+                    const isNewFromEcho = newMsg.isFromEcho === true;
+                    const isExistingFromEcho = existingMsg.isFromEcho === true;
+
+                    if (isNewFromEcho && !isExistingFromEcho) {
+                        // New message is from echo, existing is not - replace existing with echo
+                        console.log(`🔄 Replacing existing message with echo version: ${newMsg.MessageId}`);
+                        console.log(`   Existing: ${existingMsg.Message} (from echo: ${isExistingFromEcho})`);
+                        console.log(`   New: ${newMsg.Message} (from echo: ${isNewFromEcho})`);
+                        messagesToReplace.push({ index: existingIndex, newMessage: newMsg });
+                    } else if (isNewFromEcho && isExistingFromEcho) {
+                        // Both are from echo - check if content/timestamp is different
+                        const newContentKey = `${newMsg.MessageId}_${newMsg.Datetime}_${newMsg.Message?.substring(0, 50)}`;
+                        const existingContentKey = `${existingMsg.MessageId}_${existingMsg.Datetime}_${existingMsg.Message?.substring(0, 50)}`;
+                        const isContentDifferent = newContentKey !== existingContentKey;
+                        if (isContentDifferent) {
+                            console.log(`🔄 Replacing existing echo message with updated echo version: ${newMsg.MessageId}`);
+                            console.log(`   Existing: ${existingMsg.Message} (${new Date(existingMsg.Datetime).toISOString()})`);
+                            console.log(`   New: ${newMsg.Message} (${new Date(newMsg.Datetime).toISOString()})`);
+                            messagesToReplace.push({ index: existingIndex, newMessage: newMsg });
+                        } else {
+                            console.log(`⚠️ Skipping duplicate echo message: ${newMsg.MessageId} (${newMsg.Message}) - ${new Date(newMsg.Datetime).toISOString()}`);
+                        }
+                    } else {
+                        // New message is NOT from echo - skip it (keep existing)
+                        console.log(`⚠️ Skipping duplicate message (keeping existing): ${newMsg.MessageId} (${newMsg.Message}) - ${new Date(newMsg.Datetime).toISOString()}`);
+                        console.log(`   Existing is from echo: ${isExistingFromEcho}, New is from echo: ${isNewFromEcho}`);
+                    }
+                } else {
+                    // No existing message with this WAMID - add it
+                    messagesToAdd.push(newMsg);
+                }
             });
 
-            if (newMessages.length > 0) {
-                console.log(`  Adding ${newMessages.length} new messages to ${chatter} (${dateAccChats[chatKey][chatter].length - newMessages.length} duplicates skipped)`);
+            // Replace existing messages (in reverse order to maintain indices)
+            messagesToReplace.sort((a, b) => b.index - a.index);
+            messagesToReplace.forEach(({ index, newMessage }) => {
+                existingContent.chatters[chatter][index] = newMessage;
+                console.log(`✅ Replaced message at index ${index} with echo version: ${newMessage.MessageId}`);
+            });
+
+            const newMessages = messagesToAdd;
+            const totalProcessed = newMessages.length + messagesToReplace.length;
+            const duplicatesSkipped = dateAccChats[chatKey][chatter].length - totalProcessed;
+
+            if (messagesToReplace.length > 0) {
+                console.log(`  🔄 Replaced ${messagesToReplace.length} existing messages with echo versions`);
+            }
+
+            if (newMessages.length > 0 || messagesToReplace.length > 0) {
+                console.log(`  📊 Processing summary for ${chatter}:`);
+                console.log(`     - New messages to add: ${newMessages.length}`);
+                console.log(`     - Messages to replace: ${messagesToReplace.length}`);
+                console.log(`     - Duplicates skipped: ${duplicatesSkipped}`);
 
                 // Log each new message being added
-                newMessages.forEach((msg, index) => {
-                    console.log(`  📝 ${index + 1}. ${msg.Message} (${msg.MessageId}) - ${new Date(msg.Datetime).toISOString()}`);
-                });
+                if (newMessages.length > 0) {
+                    newMessages.forEach((msg, index) => {
+                        console.log(`  📝 ${index + 1}. NEW: ${msg.Message} (${msg.MessageId}) - ${new Date(msg.Datetime).toISOString()}`);
+                    });
+                }
 
-                // Append new messages after existing messages
-                existingContent.chatters[chatter] = [
-                    ...existingContent.chatters[chatter],
-                    ...newMessages,
-                ];
+                // Append new messages after existing messages (replacements already done)
+                if (newMessages.length > 0) {
+                    existingContent.chatters[chatter] = [
+                        ...existingContent.chatters[chatter],
+                        ...newMessages,
+                    ];
+                }
 
                 // Sort all messages by timestamp to maintain proper sequence
                 existingContent.chatters[chatter] = existingContent.chatters[chatter].sort((a, b) => a.Datetime - b.Datetime);
 
-                // Validate no messages were lost
+                // Validate no messages were lost (account for replacements)
                 const finalCount = existingContent.chatters[chatter].length;
-                const expectedCount = existingMessages.length + newMessages.length;
+                const expectedCount = existingMessages.length + newMessages.length; // Replacements don't change count
                 if (finalCount !== expectedCount) {
                     console.error(`🚨 MESSAGE COUNT MISMATCH for ${chatter}: expected ${expectedCount}, got ${finalCount}`);
+                } else {
+                    console.log(`✅ Message processing complete for ${chatter}: ${finalCount} total messages`);
                 }
             } else {
-                console.log(`  No new messages to add for ${chatter} (all were duplicates)`);
+                console.log(`  ℹ️ No new messages to add or replace for ${chatter} (all were duplicates)`);
             }
         }
 
@@ -1193,7 +1264,7 @@ async function checkForSendFormat(eventData) {
         if (response.data?.error) {
             return null;
         }
-        uid = response.data?.data?.workapace_id;
+        uid = response.data?.data?.workspace_id;
         org_id = response.data?.data?.org_id;
     } catch (err) {
         console.log(
@@ -1625,7 +1696,7 @@ async function checkForReplyFormat(eventData) {
         if (response.data?.error) {
             return null;
         }
-        uid = response.data?.data?.workapace_id;
+        uid = response.data?.data?.workspace_id;
         org_id = response.data?.data?.org_id;
     } catch (err) {
         console.log(
@@ -1694,6 +1765,166 @@ async function checkForReplyFormat(eventData) {
     return formattedObj;
 }
 
+// Check for echo payload format (message_echoes)
+async function checkForEchoFormat(eventData) {
+    if (
+        !eventData?.object ||
+        eventData.object !== "whatsapp_business_account" ||
+        !eventData.entry ||
+        !Array.isArray(eventData.entry) ||
+        eventData.entry.length === 0
+    ) {
+        return null;
+    }
+
+    const entry = eventData.entry[0];
+    if (
+        !entry.changes ||
+        !Array.isArray(entry.changes) ||
+        entry.changes.length === 0
+    ) {
+        return null;
+    }
+
+    const change = entry.changes[0];
+    if (
+        !change.value ||
+        !change.value.message_echoes ||
+        !Array.isArray(change.value.message_echoes) ||
+        change.value.message_echoes.length === 0
+    ) {
+        return null;
+    }
+
+    // Check if this is the echo field (allow if field is missing or matches)
+    if (change.field && change.field !== "smb_message_echoes") {
+        return null;
+    }
+
+    const echo = change.value.message_echoes[0];
+    const metadata = change.value.metadata;
+
+    if (
+        !echo?.id ||
+        !echo?.from ||
+        !echo?.to ||
+        !metadata?.display_phone_number
+    ) {
+        return false;
+    }
+
+    let msgId = echo.id;
+    let msgTimestamp = echo.timestamp
+        ? parseInt(echo.timestamp) * 1000
+        : Date.now();
+    const direction = "OUTGOING";
+
+    let from = metadata.display_phone_number;
+    let to = echo.to;
+
+    // Extract message content based on type
+    let msg = "";
+    let msgType = echo.type?.toLowerCase() || "text";
+    if (msgType === "text" && echo.text?.body) {
+        msg = echo.text.body;
+    } else if (echo[msgType]) {
+        msg = JSON.stringify(echo[msgType]);
+    }
+
+    // Get org_id and uid
+    let org_id = null;
+    let uid = null;
+    try {
+        const response = await axios.post(
+            "https://dev.eazybe.com/v2/waba/get-embedded-signup-by-phone-number",
+            { phone_number: from },
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                    "private-key": "123456789",
+                },
+            }
+        );
+
+        if (response.data?.error) {
+            return null;
+        }
+        console.log(response.data?.data);
+        uid = response.data?.data?.workspace_id;
+        org_id = response.data?.data?.org_id;
+    } catch (err) {
+        console.log(
+            "---------------ERROR START while fetching org id from API-------------"
+        );
+        console.log(err);
+        console.log(
+            "---------------ERROR END while fetching org id from API-------------"
+        );
+    }
+
+    if (!org_id) {
+        console.log("⚠️ No org_id found, using default for testing");
+        org_id = "missing_org_id";
+    }
+
+    if (!uid) {
+        console.log("⚠️ No uid found, using default for testing");
+        uid = "missing_uid";
+    }
+
+    // Echo messages are typically text messages, not templates
+    let isBroadcast = false;
+    let template_code = null;
+
+    // Log message processing for echo
+    sendDiscordMessage(
+        "Message Processing Complete - Echo",
+        `📝 Echo message processing complete\nMessage ID: ${msgId}\nMessage: ${msg}\nMessage Type: ${msgType}\nFrom: ${from}\nTo: ${to}`
+    );
+
+    let formattedObj = {
+        uid: uid,
+        orgId: org_id,
+        phoneNumber: from,
+        nameMapping: {
+            [`${to}@c.us`]: "",
+            [`${from}@c.us`]: "",
+        },
+        chatters: {
+            [`${to}@c.us`]: [
+                {
+                    isBroadcast: isBroadcast,
+                    broadcastData: isBroadcast
+                        ? {
+                            pricing: null,
+                        }
+                        : null,
+                    MessageId: msgId,
+                    Message: msg,
+                    Chatid: `${to}@c.us`,
+                    File: null,
+                    Ack: 1,
+                    Datetime: msgTimestamp,
+                    Date: new Date(msgTimestamp).toISOString().split("T")[0],
+                    Direction: direction,
+                    Sentbyid: `${from}@c.us`,
+                    CreatedByUser: from,
+                    SentByNumber: from,
+                    SpecialData:
+                        msgType === "text"
+                            ? { payload: msg }
+                            : { [msgType]: echo[msgType] || {} },
+                    Type: msgType,
+                    isFromEcho: true, // Flag to indicate this message is from echo webhook
+                },
+            ],
+        },
+        groupParticipants: {},
+    };
+
+    return formattedObj;
+}
+
 async function detectingAndModifyingDataFormat(eventData) {
     // console.log("🔍 detectingAndModifyingDataFormat called with:", JSON.stringify(eventData, null, 2));
 
@@ -1717,7 +1948,7 @@ async function detectingAndModifyingDataFormat(eventData) {
         return eventData;
     }
 
-    console.log("🔄 Data format needs processing, checking for send/reply formats...");
+    console.log("🔄 Data format needs processing, checking for send/echo/reply formats...");
 
 
     console.log(
@@ -1739,6 +1970,18 @@ async function detectingAndModifyingDataFormat(eventData) {
             `sendFormatResult:\n${JSON.stringify(sendFormatResult)}`
         );
         return sendFormatResult;
+    }
+
+    let echoFormatResult = await checkForEchoFormat(eventData);
+    // Discord log for echoFormatResult
+    console.log(JSON.stringify(echoFormatResult));
+    console.log("--> echoFormatResult");
+    if (echoFormatResult) {
+        await sendDiscordMessage(
+            "detectingAndModifyingDataFormat",
+            `echoFormatResult:\n${JSON.stringify(echoFormatResult)}`
+        );
+        return echoFormatResult;
     }
 
     let replyFormatResult = await checkForReplyFormat(eventData);
@@ -2219,23 +2462,49 @@ const mainEngine = async (req, res) => {
             }
         }
 
-        // CRITICAL FIX: Clean up duplicate MessageIds from incoming data
+        // CRITICAL FIX: Clean up duplicate MessageIds from incoming data (prefer echo messages)
         if (duplicateMessageIds.size > 0) {
-            console.log(`🧹 Cleaning up ${duplicateMessageIds.size} duplicate MessageIds from incoming data...`);
+            console.log(`🧹 Cleaning up ${duplicateMessageIds.size} duplicate MessageIds from incoming data (preferring echo messages)...`);
 
             for (let chatter in eventData.chatters) {
                 const originalCount = eventData.chatters[chatter].length;
-                const seenMessageIds = new Set();
+                const messageMapByWamid = new Map();
 
-                // Keep only the first occurrence of each MessageId
-                eventData.chatters[chatter] = eventData.chatters[chatter].filter(msg => {
-                    if (seenMessageIds.has(msg.MessageId)) {
-                        console.log(`🗑️ Removing duplicate MessageId: ${msg.MessageId} (${msg.Message})`);
-                        return false;
+                const messagesWithoutId = [];
+
+                // Group messages by WAMID and prefer echo messages
+                eventData.chatters[chatter].forEach(msg => {
+                    if (!msg.MessageId) {
+                        // Message without ID - keep it separately
+                        messagesWithoutId.push(msg);
+                        return;
                     }
-                    seenMessageIds.add(msg.MessageId);
-                    return true;
+
+                    if (!messageMapByWamid.has(msg.MessageId)) {
+                        // First occurrence of this WAMID
+                        messageMapByWamid.set(msg.MessageId, msg);
+                    } else {
+                        // Duplicate WAMID found - check which one to keep
+                        const existingMsg = messageMapByWamid.get(msg.MessageId);
+                        const isNewFromEcho = msg.isFromEcho === true;
+                        const isExistingFromEcho = existingMsg.isFromEcho === true;
+
+                        if (isNewFromEcho && !isExistingFromEcho) {
+                            // New message is from echo, existing is not - replace with echo
+                            console.log(`🔄 Preferring echo version in batch: ${msg.MessageId} (replacing non-echo)`);
+                            messageMapByWamid.set(msg.MessageId, msg);
+                        } else if (isNewFromEcho && isExistingFromEcho) {
+                            // Both are echo - keep the existing one (or could keep the latest)
+                            console.log(`⚠️ Both are echo, keeping first: ${msg.MessageId}`);
+                        } else {
+                            // New is not echo, existing might be echo - keep existing
+                            console.log(`🗑️ Removing duplicate MessageId (keeping existing): ${msg.MessageId} (${msg.Message})`);
+                        }
+                    }
                 });
+
+                // Rebuild the array with deduplicated messages + messages without ID
+                eventData.chatters[chatter] = [...Array.from(messageMapByWamid.values()), ...messagesWithoutId];
 
                 const cleanedCount = eventData.chatters[chatter].length;
                 if (originalCount !== cleanedCount) {
